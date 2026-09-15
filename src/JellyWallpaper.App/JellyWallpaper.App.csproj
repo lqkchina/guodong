@@ -3,25 +3,29 @@
   <!--
     JellyWallpaper 果冻弹性壁纸 - Windows 应用工程
     =====================================================================
-    技术栈（v3 定稿，全部使用 Windows 10 系统自带 API，避免 WinAppSDK
-    运行时部署问题）：
+    技术栈（v4.5 定稿 —— 系统版 Composition 挂载 + SharpDX Direct2D 渲染）：
       * C# / .NET 8（net8.0-windows10.0.19041.0，Win10 2004+）
-      * Microsoft.Graphics.Win2D 1.2.2 —— Direct2D 渲染（微软官方 NuGet）
-      * Windows.UI.Composition（系统内置 DWM 合成 API，Win10 1709+ 自带）：
+      * Windows.UI.Composition（系统内置 DWM 合成 API）：
           - 桌面挂载：ICompositorDesktopInterop + CompositionTarget
-            （动态壁纸工具的标准方案，Win10/Win11 全系稳定）
-          - 渲染表面：CompositionGraphicsDevice / CompositionDrawingSurface /
-            CompositionSurfaceBrush / SpriteVisual
-      * Windows.System.DispatcherQueue（系统内置调度队列，Win10 1709+ 自带）
+            （动态壁纸工具标准方案，Win10/Win11 全系稳定，无需任何运行时）
+          - 图形设备：ICompositorInterop::CreateGraphicsDevice(ID2D1Device)
+          - 合成树：CompositionSurfaceBrush + SpriteVisual
+      * SharpDX 4.2.0（DirectX 托管封装，vtable 社区验证）：
+          - SharpDX.Direct3D11 + DXGI —— D3D11 设备 / DXGI 设备
+          - SharpDX.Direct2D1 —— Direct2D 渲染（含 WIC 图片解码）
       * WPF 设置窗口 + WinForms 托盘图标
 
-    为什么不用 Microsoft.WindowsAppSDK（v1/v2 的血泪教训）：
-      * v1（ContentIsland/DesktopChildSiteBridge）：WinAppSDK 1.6 的
-        DesktopChildSiteBridge 在 Win10 上实测原生崩溃（AccessViolation）；
-      * v2（ICompositorDesktopInterop + CompositionTarget）：Microsoft.UI.Composition
-        的 C# 投影里根本没有 CompositionTarget 类型（CS0246）；
-      * 且 WinAppSDK unpackaged 部署依赖运行时激活清单，容易 0x80040154。
-      Windows.UI.Composition（系统版）无上述任何问题，且无需任何运行时部署。
+    为什么是 v4.5（前四版的血泪教训）：
+      * v1 WinAppSDK 1.6 ContentIsland：Win10 19041 原生崩溃；
+      * v2 WinAppSDK ICompositorDesktopInterop：C# 投影无 CompositionTarget；
+      * v3 系统版 Windows.UI.Composition + Win2D：Win2D 无系统版桌面资产；
+      * v4 SharpDX.DirectComposition：该 NuGet 包残缺（文档声称的方法
+        实际 DLL 未实现，CreateTargetForHwnd/CreateVisual 均缺失）。
+      v4.5 = 系统版挂载（v3 已验证的稳定部分）+ SharpDX 渲染（v4 验证
+      完整性的部分），绕开全部 WinRT 投影缺失与包残缺问题。
+
+    图层 Z 序：DComp 合成内容挂 Progman 客户区 → 系统壁纸 → 本程序
+    Direct2D 渲染层 → 桌面图标。不用置顶透明窗、不注入、不钩子。
 
     发布配置：dotnet publish 目录版（绿色免安装文件夹，双击 exe 即用）。
   -->
@@ -38,7 +42,7 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
 
-    <!-- 目标平台：Win2D 原生组件仅支持 x64 -->
+    <!-- 目标平台：SharpDX/D3D 原生组件仅支持 x64 -->
     <PlatformTarget>x64</PlatformTarget>
 
     <!-- 每显示器 V2 DPI 感知（见 app.manifest） -->
@@ -54,12 +58,14 @@
 
   <ItemGroup>
     <!--
-      NuGet 包清单（v3）：
-        Microsoft.Graphics.Win2D 1.2.2 —— 最后一个面向系统版
-        Windows.UI.Composition 的 Win2D 版本（1.3.x 改投 WinAppSDK）。
-        不依赖 Windows App SDK，无运行时部署负担。
+      NuGet 包清单（v4.5）：SharpDX 4.2.0 渲染相关包
+      （DirectComposition 包残缺不使用；WIC 包含在 Direct2D1 包内）
     -->
-    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.2.2" />
+    <PackageReference Include="SharpDX" Version="4.2.0" />
+    <PackageReference Include="SharpDX.Direct3D11" Version="4.2.0" />
+    <PackageReference Include="SharpDX.DXGI" Version="4.2.0" />
+    <PackageReference Include="SharpDX.Direct2D1" Version="4.2.0" />
+    <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
   </ItemGroup>
 
   <ItemGroup>

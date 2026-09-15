@@ -11,74 +11,45 @@ namespace JellyWallpaper.App.Composition;
 /// <summary>
 /// DWM 桌面合成宿主（模块④的核心，也是图层 Z 序的关键）。
 ///
-/// ── 图层 Z 序原理 ─────────────────────────────────────────────────
+/// ── 图层 Z 序原理（v4.5：系统版 Windows.UI.Composition）────────────
 /// Windows 桌面的窗口结构（Win10/11）：
 ///     Progman（Program Manager，桌面根窗口）
 ///       ├─ SHELLDLL_DefView → SysListView32（桌面图标层，Progman 的子窗口）
 ///       └─ （DWM 绘制的系统壁纸层，位于 Progman 之下）
 ///
-/// 本类使用 Windows 10 系统内置的 DWM 合成 API（v3，动态壁纸标准方案）：
-///   ICompositorDesktopInterop + CompositionTarget
+/// 本类使用 Windows 10 系统内置的合成 API：
 ///   1. Compositor 创建根容器视觉（Windows.UI.Composition，系统自带）；
-///   2. 把 Compositor 转到 ICompositorDesktopInterop（系统公开 COM 接口，
-///      GUID 29E691FA-...），调用 CreateDesktopWindowTarget(Progman, false)
-///      获得 CompositionTarget；
-///   3. 把根视觉赋给 CompositionTarget.Root，合成内容即渲染到桌面窗口
+///   2. ICompositorDesktopInterop（系统公开 COM 接口，GUID 29E691FA-...）
+///      CreateDesktopWindowTarget(Progman, false) → CompositionTarget
+///      （系统版 C# 投影存在，v2 的 CS0246 问题不存在）；
+///   3. ICompositorInterop（GUID 25297D5C-...）
+///      CreateGraphicsDevice(ID2D1Device) → CompositionGraphicsDevice
+///      —— 绘制表面（CompositionDrawingSurface）的创建来源；
+///   4. 根视觉赋给 CompositionTarget.Root，合成内容渲染到桌面窗口
 ///      客户区：位于系统壁纸之上、图标子窗口（SysListView32）之下。
 ///
 /// 最终 Z 序严格为：系统壁纸 → 本程序 Direct2D 渲染层 → 桌面图标。
-/// 这正是需求要求的顺序，且：
-///   * 不使用置顶透明窗口、不注入 explorer、不 Hook WorkerW、
-///     不装任何全局钩子（输入用 GetAsyncKeyState 轮询，见 MouseInputService）；
-///   * 图标层永远是独立 HWND，位于我们的合成内容之上，
-///     移动/增删图标完全不受干扰，点击图标也走原生行为。
+/// 且：不使用置顶透明窗口、不注入 explorer、不 Hook WorkerW、
+/// 不装任何全局钩子（输入用 GetAsyncKeyState 轮询，见 MouseInputService）；
+/// 图标层永远是独立 HWND，位于合成内容之上，移动/增删完全不受干扰。
 ///
-/// ── 版本演进（为什么是 v3）────────────────────────────────────────
-/// v1（WinAppSDK 1.6 ContentIsland/DesktopChildSiteBridge）：
-///     实测在 Win10 19041 上原生崩溃（AccessViolationException）；
-/// v2（WinAppSDK 1.6 ICompositorDesktopInterop + CompositionTarget）：
-///     Microsoft.UI.Composition 的 C# 投影没有 CompositionTarget（CS0246）；
-/// v3（系统版 Windows.UI.Composition）：
-///     系统 API 自带 CompositionTarget 投影 + ICompositorDesktopInterop，
-///     Win10 1709+ 全系稳定，且不依赖任何运行时部署（根治 0x80040154）。
+/// ── 版本演进（为什么是 v4.5）──────────────────────────────────────
+/// v1 WinAppSDK ContentIsland：Win10 19041 原生崩溃；
+/// v2 WinAppSDK ICompositorDesktopInterop：C# 投影无 CompositionTarget；
+/// v3 系统版 Composition + Win2D：Win2D 无系统版桌面资产；
+/// v4 SharpDX.DirectComposition：NuGet 包残缺（核心方法未实现）；
+/// v4.5 系统版挂载（系统投影齐备）+ SharpDX Direct2D 渲染（包完整）。
 ///
 /// ── 线程模型 ─────────────────────────────────────────────────────
 /// 所有 Composition 对象必须在"带 DispatcherQueue 的合成线程"上创建
-/// （见 WallpaperLayerManager 的专用线程），本类方法均在该线程调用。
+/// （见 WallpaperLayerManager），本类方法均在该线程调用。
 /// </summary>
 public sealed class DesktopWallpaperHost
 {
-    // Windows 10 系统内置的 Compositor 桌面互操作 COM 接口：
-    //   MIDL_INTERFACE("29E691FA-4567-4DCA-B319-DB0B3C6274D4")
-    //   ICompositorDesktopInterop : IUnknown {
-    //     HRESULT CreateDesktopWindowTarget(HWND hwndTarget, BOOL isTopmost, IUnknown** result);
-    //     HRESULT EnsureOnThread(DWORD threadId);
-    //   };
-    // CsWinRT 生成的 Compositor 对象实现了 ICustomQueryInterface，
-    // 因此可以直接 cast 到该 ComImport 接口（C# 动态壁纸项目标准做法）。
-    [ComImport]
-    [Guid("29E691FA-4567-4DCA-B319-DB0B3C6274D4")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface ICompositorDesktopInterop
-    {
-        /// <summary>
-        /// 创建桌面窗口合成目标：把 HWND 变成 CompositionTarget，
-        /// 之后把根视觉赋给 target.Root 即开始合成。
-        /// </summary>
-        /// <param name="hwndTarget">目标桌面窗口句柄（Progman）</param>
-        /// <param name="isTopmost">是否置顶；false = 合成内容在窗口客户区内部（非顶层）</param>
-        /// <param name="result">返回 CompositionTarget 的 IUnknown 指针</param>
-        void CreateDesktopWindowTarget(IntPtr hwndTarget,
-                                       [MarshalAs(UnmanagedType.Bool)] bool isTopmost,
-                                       out IntPtr result);
-
-        /// <summary>确保互操作调用在指定线程执行（当前即合成线程，传自身线程 ID）</summary>
-        void EnsureOnThread(uint threadId);
-    }
-
     private Compositor? _compositor;
     private ContainerVisual? _root;
-    private CompositionTarget? _target; // 必须保持强引用，防止 GC 回收导致原生层崩溃
+    private CompositionTarget? _target;   // 保持强引用，防 GC 回收
+    private CompositionGraphicsDevice? _graphicsDevice; // 保持强引用
     private IntPtr _progmanHwnd;
     private bool _initialized;
 
@@ -91,12 +62,17 @@ public sealed class DesktopWallpaperHost
     /// <summary>合成器（各屏幕渲染层用它创建视觉/画笔）</summary>
     public Compositor? Compositor => _compositor;
 
+    /// <summary>组合图形设备（各屏幕渲染层用它创建绘制表面）</summary>
+    public CompositionGraphicsDevice? GraphicsDevice => _graphicsDevice;
+
     /// <summary>
-    /// 查找 Progman 并创建桌面合成目标。必须在合成线程调用。
-    /// 返回 false 表示 explorer 尚未就绪或系统不支持（WallpaperLayerManager 会定时重试）。
-    /// 全部挂载逻辑包在 try-catch 中：失败只降级不崩溃，由上层重试。
+    /// 查找 Progman 并创建桌面合成目标与图形设备。必须在合成线程调用。
+    /// 返回 false 表示 explorer 尚未就绪或系统不支持（上层会定时重试）。
+    /// 失败只降级不崩溃（全部挂载逻辑包在 try-catch 中）。
     /// </summary>
-    public bool Initialize()
+    /// <param name="d2dDevice">Direct2D 设备（SharpDX.Direct2D1.Device 的原生指针）
+    /// —— CompositionGraphicsDevice 的底层渲染设备</param>
+    public bool Initialize(IntPtr d2dDevice)
     {
         Teardown();
 
@@ -109,30 +85,60 @@ public sealed class DesktopWallpaperHost
             _compositor = new Compositor();
             _root = _compositor.CreateContainerVisual();
 
-            // Compositor → 桌面互操作接口（CsWinRT 对象支持 QI 到此自定义 COM 接口）
-            var interop = (ICompositorDesktopInterop)(object)_compositor;
-
-            // 挂到 Progman：isTopmost=false → 合成内容在桌面窗口客户区内部，
-            // 位于系统壁纸之上、图标子窗口之下（Z 序正确）
-            interop.CreateDesktopWindowTarget(_progmanHwnd, false, out IntPtr targetPtr);
+            // ① 桌面挂载：Compositor → ICompositorDesktopInterop
+            //    （系统版 Compositor 实现此接口；走 QueryInterface + RCW，
+            //      不依赖 CsWinRT 类型的内部 cast 行为）
+            IntPtr targetPtr = IntPtr.Zero;
+            var desktopInterop = CompositionInterop.GetInterop<ICompositorDesktopInterop>(
+                _compositor, CompositionInterop.ICompositorDesktopInteropIid);
+            try
+            {
+                desktopInterop.CreateDesktopWindowTarget(_progmanHwnd, false, out targetPtr);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(desktopInterop);
+            }
             if (targetPtr == IntPtr.Zero)
             {
                 Teardown();
                 return false;
             }
 
-            // 包装为系统版投影对象（CompositionTarget 在 Windows.UI.Composition
-            // 投影中存在，v2 的 CS0246 问题在系统版不存在），并设为根视觉
+            // 包装为系统版投影对象（Windows.UI.Composition.CompositionTarget
+            // 存在且带 Root 属性），把根视觉挂到桌面窗口。
+            // FromAbi 内部会 AddRef，因此释放我们这一针引用。
             _target = CompositionTarget.FromAbi(targetPtr);
+            Marshal.Release(targetPtr);
             _target.Root = _root;
+
+            // ② 图形设备：ICompositorInterop::CreateGraphicsDevice(ID2D1Device)
+            //    → CompositionGraphicsDevice（创建绘制表面的来源）
+            IntPtr gfxPtr = IntPtr.Zero;
+            var compositorInterop = CompositionInterop.GetInterop<ICompositorInterop>(
+                _compositor, CompositionInterop.ICompositorInteropIid);
+            try
+            {
+                compositorInterop.CreateGraphicsDevice(d2dDevice, out gfxPtr);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(compositorInterop);
+            }
+            if (gfxPtr == IntPtr.Zero)
+            {
+                Teardown();
+                return false;
+            }
+            _graphicsDevice = CompositionGraphicsDevice.FromAbi(gfxPtr);
+            Marshal.Release(gfxPtr);
 
             _initialized = true;
             return true;
         }
         catch (Exception ex)
         {
-            // 挂载失败（系统不支持/权限/原生异常等）：清理后返回 false，由上层重试。
-            // 注意：.NET Core 可捕获 AccessViolationException，不会让进程直接死掉。
+            // 挂载失败：清理后返回 false，由上层重试
             System.Diagnostics.Debug.WriteLine($"[DesktopWallpaperHost] 挂载失败: {ex}");
             Teardown();
             return false;
@@ -142,6 +148,8 @@ public sealed class DesktopWallpaperHost
     /// <summary>销毁旧 DWM 资源（explorer 重启后调用，随后重新 Initialize）</summary>
     public void Teardown()
     {
+        _graphicsDevice?.Dispose();
+        _graphicsDevice = null;
         _target?.Dispose();
         _target = null;
         _root = null;

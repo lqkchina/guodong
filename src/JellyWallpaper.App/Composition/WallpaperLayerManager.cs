@@ -6,11 +6,14 @@ using JellyWallpaper.App.Native;
 using JellyWallpaper.App.Simulation;
 using JellyWallpaper.App.Wallpaper;
 using JellyWallpaper.Core.Config;
-using Microsoft.Graphics.Canvas;
+using SharpDX.Direct3D;
+using SharpDX.Direct3D11;
 using Windows.System;
 // 屏幕像素矩形（Screen.Bounds 返回类型）：显式别名消除歧义
 // （System.Drawing.Rectangle vs System.Windows.Shapes.Rectangle）
 using Rectangle = System.Drawing.Rectangle;
+using Device = SharpDX.Direct3D11.Device;
+
 
 namespace JellyWallpaper.App.Composition;
 
@@ -19,13 +22,19 @@ namespace JellyWallpaper.App.Composition;
 ///
 /// 线程模型（三层，各自解耦）：
 ///   ① 主线程（WPF）：设置 UI，读写 AppConfig；
-///   ② 合成线程（专用 DispatcherQueue 线程）：Compositor / Win2D / 渲染，
+///   ② 合成线程（专用 DispatcherQueue 线程）：Compositor / Direct2D / 渲染，
 ///      所有 Composition 对象与渲染循环都在这里；
 ///   ③ 物理线程（SimulationLoop）：60FPS 固定步长模拟，只写网格快照。
 ///
+/// GPU 设备链（v4.5）：
+///   D3D11 Device（SharpDX）→ QI IDXGIDevice
+///     → D2D Factory1.CreateDevice(IDXGIDevice) → ID2D1Device
+///     → ICompositorInterop::CreateGraphicsDevice(ID2D1Device)
+///       → CompositionGraphicsDevice（创建绘制表面的来源）
+///
 /// 职责：
 ///   * 启动合成线程，初始化 DWM 桌面合成宿主（挂到 Progman）；
-///   * 为每块屏幕创建独立 MonitorRenderLayer（视觉/交换链/网格实例）；
+///   * 为每块屏幕创建独立 MonitorRenderLayer（视觉/表面/网格实例）；
 ///   * 接线：壁纸变化 → 异步加载纹理；explorer 重启 → 销毁并重建合成层；
 ///   * 向设置窗口暴露 Config 以便实时调参。
 /// </summary>
@@ -35,7 +44,9 @@ public sealed class WallpaperLayerManager : IDisposable
     private readonly DispatcherQueueController _queueController;
     private readonly DispatcherQueue _queue;
     private readonly DesktopWallpaperHost _host = new();
-    private readonly CanvasDevice _device;
+    private readonly Device _d3d;
+    private readonly SharpDX.Direct2D1.Device _d2dDevice; // 长期持有（Composition 图形设备底层）
+    private readonly IntPtr _d2dDevicePtr;
     private readonly SimulationLoop _simulation;
     private readonly WallpaperWatcher _wallpaperWatcher;
     private readonly ExplorerWatcher _explorerWatcher;
@@ -57,12 +68,24 @@ public sealed class WallpaperLayerManager : IDisposable
     {
         _config = config;
 
-        // ① 专用合成线程：所有 Composition/Win2D 对象必须在这里创建
+        // ① 专用合成线程：所有 Composition/D2D 对象必须在这里创建/使用
         _queueController = DispatcherQueueController.CreateOnDedicatedThread();
         _queue = _queueController.DispatcherQueue;
 
-        // 共享 GPU 设备（Win2D 官方推荐，避免每层重复创建设备）
-        _device = CanvasDevice.GetSharedDevice();
+        // 共享 GPU 设备链：D3D11 → IDXGIDevice → ID2D1Device
+        // （硬件加速；无 GPU 环境回退 WARP 软件渲染，虚拟机/远程桌面也能跑。
+        //  SharpDX 的 D2D Device 直接由 DXGI 设备构造，无需 Factory.CreateDevice）
+        try
+        {
+            _d3d = new Device(DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+        }
+        catch
+        {
+            _d3d = new Device(DriverType.Warp, DeviceCreationFlags.BgraSupport);
+        }
+
+        _d2dDevice = new SharpDX.Direct2D1.Device(_d3d.QueryInterface<SharpDX.DXGI.Device>());
+        _d2dDevicePtr = _d2dDevice.NativePointer;
 
         _simulation = new SimulationLoop(this, config);
         _wallpaperWatcher = new WallpaperWatcher(config, Screen.AllScreens.Length);
@@ -99,7 +122,8 @@ public sealed class WallpaperLayerManager : IDisposable
     {
         if (_disposed) return;
 
-        if (_host.Initialize())
+        // 宿主挂载：用 Direct2D 设备指针（ID2D1Device）创建组合图形设备
+        if (_host.Initialize(_d2dDevicePtr))
         {
             BuildLayers();
         }
@@ -130,7 +154,7 @@ public sealed class WallpaperLayerManager : IDisposable
             Rectangle bounds = screen.Bounds;
             float dpi = GetMonitorDpi(bounds);
 
-            var layer = new MonitorRenderLayer(_host, _config, _device, _queue, bounds, dpi);
+            var layer = new MonitorRenderLayer(_host, _config, _queue, bounds, dpi);
             layer.CreateVisual();
             list.Add(layer);
         }
@@ -210,7 +234,12 @@ public sealed class WallpaperLayerManager : IDisposable
                 layer.Dispose();
             _layers = Array.Empty<MonitorRenderLayer>();
             _host.Teardown();
+            _d2dDevice.Dispose();
+            
             _ = _queueController.ShutdownQueueAsync();
         });
+
+        // D3D 设备仅在设备链创建时使用，可立即释放
+        _d3d.Dispose();
     }
 }
