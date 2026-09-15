@@ -8,8 +8,12 @@ namespace JellyWallpaper.App;
 /// 应用入口。
 /// 职责：单实例互斥 → 加载配置 → 启动壁纸管理器（合成线程 + 物理线程）
 /// → 显示 WPF 设置窗口。关闭窗口只隐藏到托盘，程序常驻（见 MainWindow）。
+/// 注意：基类必须用全限定名 System.Windows.Application —— 本工程同时启用了
+/// WPF 与 WinForms（托盘图标），两者的隐式 using 都会导入，裸写 Application
+/// 会产生 CS0104 歧义编译错误（System.Windows.Forms.Application 与
+/// System.Windows.Application 同名）。
 /// </summary>
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     private Mutex? _mutex;
 

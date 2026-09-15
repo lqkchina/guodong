@@ -4,6 +4,9 @@ using Microsoft.UI;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Content;
 using Windows.Graphics;
+// 屏幕像素坐标点：显式别名消除歧义（System.Drawing.Point vs System.Windows.Point，
+// 本工程同时启用 WPF 与 WinForms 时两个命名空间都可见，裸写 Point 会 CS0104）
+using Point = System.Drawing.Point;
 
 namespace JellyWallpaper.App.Composition;
 

@@ -8,6 +8,9 @@ using JellyWallpaper.App.Wallpaper;
 using JellyWallpaper.Core.Config;
 using Microsoft.Graphics.Canvas;
 using Microsoft.UI.Dispatching;
+// 屏幕像素矩形（Screen.Bounds 返回类型）：显式别名消除歧义
+// （System.Drawing.Rectangle vs System.Windows.Shapes.Rectangle）
+using Rectangle = System.Drawing.Rectangle;
 
 namespace JellyWallpaper.App.Composition;
 

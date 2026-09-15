@@ -1,5 +1,7 @@
 using System.Drawing;
 using JellyWallpaper.App.Native;
+// 屏幕像素矩形：显式别名消除歧义（System.Drawing.Rectangle vs System.Windows.Shapes.Rectangle）
+using Rectangle = System.Drawing.Rectangle;
 
 namespace JellyWallpaper.App.Desktop;
 

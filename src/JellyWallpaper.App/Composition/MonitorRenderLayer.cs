@@ -12,6 +12,9 @@ using Microsoft.Graphics.DirectX;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
 using Windows.UI;
+// 屏幕像素矩形（屏幕边界 / 布局计算）：显式别名消除歧义
+// （System.Drawing.Rectangle vs System.Windows.Shapes.Rectangle）
+using Rectangle = System.Drawing.Rectangle;
 
 namespace JellyWallpaper.App.Composition;
 
