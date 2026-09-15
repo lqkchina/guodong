@@ -3,19 +3,27 @@
   <!--
     JellyWallpaper 果冻弹性壁纸 - Windows 应用工程
     =====================================================================
-    技术栈（与需求一致）：
-      * C# / .NET 8
-      * CsWinRT（Microsoft.WindowsAppSDK 1.6 自带的 WinRT 投影）
-      * Microsoft.Graphics.DirectX + Direct2D（Microsoft.Graphics.Win2D 1.3.2，
-        这是微软官方基于 Direct2D 的 WinRT 封装，CanvasSwapChain 即
-        IDXGISwapChain 的组合交换链）
+    技术栈（v3 定稿，全部使用 Windows 10 系统自带 API，避免 WinAppSDK
+    运行时部署问题）：
+      * C# / .NET 8（net8.0-windows10.0.19041.0，Win10 2004+）
+      * Microsoft.Graphics.Win2D 1.2.2 —— Direct2D 渲染（微软官方 NuGet）
+      * Windows.UI.Composition（系统内置 DWM 合成 API，Win10 1709+ 自带）：
+          - 桌面挂载：ICompositorDesktopInterop + CompositionTarget
+            （动态壁纸工具的标准方案，Win10/Win11 全系稳定）
+          - 渲染表面：CompositionGraphicsDevice / CompositionDrawingSurface /
+            CompositionSurfaceBrush / SpriteVisual
+      * Windows.System.DispatcherQueue（系统内置调度队列，Win10 1709+ 自带）
       * WPF 设置窗口 + WinForms 托盘图标
-      * Windows.UI.Composition 等价物：Microsoft.UI.Composition（WinAppSDK 版
-        视觉层，通过 ICompositorDesktopInterop 挂到桌面窗口）
 
-    发布配置（VS2022 一键发布为独立单文件 EXE，自带 .NET 运行时）：
-      RuntimeIdentifier=win-x64 + SelfContained + PublishSingleFile
-      + WindowsAppSDKSelfContained（WinAppSDK 运行时也打进去，绿色免安装）
+    为什么不用 Microsoft.WindowsAppSDK（v1/v2 的血泪教训）：
+      * v1（ContentIsland/DesktopChildSiteBridge）：WinAppSDK 1.6 的
+        DesktopChildSiteBridge 在 Win10 上实测原生崩溃（AccessViolation）；
+      * v2（ICompositorDesktopInterop + CompositionTarget）：Microsoft.UI.Composition
+        的 C# 投影里根本没有 CompositionTarget 类型（CS0246）；
+      * 且 WinAppSDK unpackaged 部署依赖运行时激活清单，容易 0x80040154。
+      Windows.UI.Composition（系统版）无上述任何问题，且无需任何运行时部署。
+
+    发布配置：dotnet publish 目录版（绿色免安装文件夹，双击 exe 即用）。
   -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -30,38 +38,28 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
 
-    <!-- 目标平台：Win2D / WinAppSDK 原生组件仅支持 x64 -->
+    <!-- 目标平台：Win2D 原生组件仅支持 x64 -->
     <PlatformTarget>x64</PlatformTarget>
 
     <!-- 每显示器 V2 DPI 感知（见 app.manifest） -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
 
-    <!-- 独立单文件发布（默认开启；VS2022 直接 F5 调试、Ctrl+P 发布） -->
+    <!-- 独立发布（目录版）：自带 .NET 运行时，绿色免安装 -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
-    <PublishSingleFile>true</PublishSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishSingleFile>false</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
     <DebugType>embedded</DebugType>
-
-    <!-- WinAppSDK：免安装（非 MSIX 打包） + 自包含运行时。
-         EnableMsixTooling 必须为 true：WinAppSDK 的构建工具链（PRI 资源生成等）
-         依赖它，且 PublishSingleFile 明确要求 EnableMsixTooling=true；
-         WindowsPackageType=None 依然保证产出 unpackaged 免安装应用。 -->
-    <WindowsPackageType>None</WindowsPackageType>
-    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
-    <EnableMsixTooling>true</EnableMsixTooling>
   </PropertyGroup>
 
   <ItemGroup>
     <!--
-      NuGet 包清单（版本为官方兼容组合，已核对依赖关系）：
-        Microsoft.WindowsAppSDK 1.6.250602001 —— CsWinRT / Composition / DispatcherQueue
-        Microsoft.Graphics.Win2D 1.3.2      —— Direct2D 渲染（依赖 WinAppSDK 1.6.x）
+      NuGet 包清单（v3）：
+        Microsoft.Graphics.Win2D 1.2.2 —— 最后一个面向系统版
+        Windows.UI.Composition 的 Win2D 版本（1.3.x 改投 WinAppSDK）。
+        不依赖 Windows App SDK，无运行时部署负担。
     -->
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250602001" />
-    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.2" />
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.2.2" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,7 +1,7 @@
 using System.Drawing;
 using System.Runtime.InteropServices;
 using JellyWallpaper.App.Native;
-using Microsoft.UI.Composition;
+using Windows.UI.Composition;
 // 屏幕像素坐标点：显式别名消除歧义（System.Drawing.Point vs System.Windows.Point，
 // 本工程同时启用 WPF 与 WinForms 时两个命名空间都可见，裸写 Point 会 CS0104）
 using Point = System.Drawing.Point;
@@ -17,14 +17,14 @@ namespace JellyWallpaper.App.Composition;
 ///       ├─ SHELLDLL_DefView → SysListView32（桌面图标层，Progman 的子窗口）
 ///       └─ （DWM 绘制的系统壁纸层，位于 Progman 之下）
 ///
-/// 本类使用 WinUI3 经典的桌面挂载方案（v2）：
+/// 本类使用 Windows 10 系统内置的 DWM 合成 API（v3，动态壁纸标准方案）：
 ///   ICompositorDesktopInterop + CompositionTarget
-///   1. Compositor 创建根容器视觉；
-///   2. 把 Compositor 转到 ICompositorDesktopInterop（WinAppSDK 公开的 COM 接口，
-///      定义在 microsoft.ui.composition.interop.h），调用
-///      CreateDesktopWindowTarget(Progman窗口, isTopmost:false) 获得 CompositionTarget；
-///   3. 把根视觉赋给 CompositionTarget.Root，合成内容即渲染到桌面窗口客户区：
-///      位于系统壁纸之上、图标子窗口（SysListView32）之下。
+///   1. Compositor 创建根容器视觉（Windows.UI.Composition，系统自带）；
+///   2. 把 Compositor 转到 ICompositorDesktopInterop（系统公开 COM 接口，
+///      GUID 29E691FA-...），调用 CreateDesktopWindowTarget(Progman, false)
+///      获得 CompositionTarget；
+///   3. 把根视觉赋给 CompositionTarget.Root，合成内容即渲染到桌面窗口
+///      客户区：位于系统壁纸之上、图标子窗口（SysListView32）之下。
 ///
 /// 最终 Z 序严格为：系统壁纸 → 本程序 Direct2D 渲染层 → 桌面图标。
 /// 这正是需求要求的顺序，且：
@@ -33,11 +33,14 @@ namespace JellyWallpaper.App.Composition;
 ///   * 图标层永远是独立 HWND，位于我们的合成内容之上，
 ///     移动/增删图标完全不受干扰，点击图标也走原生行为。
 ///
-/// ── 为什么不用 ContentIsland/DesktopChildSiteBridge（v1）────────────
-/// v1 在 Windows 10（如 19041）上实测触发 WinAppSDK 原生层的
-/// AccessViolationException（DesktopChildSiteBridge.Create 崩溃）。
-/// ICompositorDesktopInterop + CompositionTarget 是 WinAppSDK 1.0 时代至今的
-/// 经典桌面挂载方案，在 Win10/Win11 上稳定性经过大量项目验证。
+/// ── 版本演进（为什么是 v3）────────────────────────────────────────
+/// v1（WinAppSDK 1.6 ContentIsland/DesktopChildSiteBridge）：
+///     实测在 Win10 19041 上原生崩溃（AccessViolationException）；
+/// v2（WinAppSDK 1.6 ICompositorDesktopInterop + CompositionTarget）：
+///     Microsoft.UI.Composition 的 C# 投影没有 CompositionTarget（CS0246）；
+/// v3（系统版 Windows.UI.Composition）：
+///     系统 API 自带 CompositionTarget 投影 + ICompositorDesktopInterop，
+///     Win10 1709+ 全系稳定，且不依赖任何运行时部署（根治 0x80040154）。
 ///
 /// ── 线程模型 ─────────────────────────────────────────────────────
 /// 所有 Composition 对象必须在"带 DispatcherQueue 的合成线程"上创建
@@ -45,14 +48,14 @@ namespace JellyWallpaper.App.Composition;
 /// </summary>
 public sealed class DesktopWallpaperHost
 {
-    // WinAppSDK 的 Compositor 桌面互操作 COM 接口（microsoft.ui.composition.interop.h）：
+    // Windows 10 系统内置的 Compositor 桌面互操作 COM 接口：
     //   MIDL_INTERFACE("29E691FA-4567-4DCA-B319-DB0B3C6274D4")
     //   ICompositorDesktopInterop : IUnknown {
     //     HRESULT CreateDesktopWindowTarget(HWND hwndTarget, BOOL isTopmost, IUnknown** result);
     //     HRESULT EnsureOnThread(DWORD threadId);
     //   };
     // CsWinRT 生成的 Compositor 对象实现了 ICustomQueryInterface，
-    // 因此可以直接 cast 到该 ComImport 接口（WinUI3 C# 社区标准做法）。
+    // 因此可以直接 cast 到该 ComImport 接口（C# 动态壁纸项目标准做法）。
     [ComImport]
     [Guid("29E691FA-4567-4DCA-B319-DB0B3C6274D4")]
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -103,8 +106,6 @@ public sealed class DesktopWallpaperHost
             if (_progmanHwnd == IntPtr.Zero)
                 return false; // explorer 未启动/重启中，稍后重试
 
-            NativeMethods.GetWindowRect(_progmanHwnd, out NativeMethods.RECT progmanRect);
-
             _compositor = new Compositor();
             _root = _compositor.CreateContainerVisual();
 
@@ -120,7 +121,8 @@ public sealed class DesktopWallpaperHost
                 return false;
             }
 
-            // 包装为 WinRT 投影对象（FromAbi 由 CsWinRT 生成），并设为根视觉
+            // 包装为系统版投影对象（CompositionTarget 在 Windows.UI.Composition
+            // 投影中存在，v2 的 CS0246 问题在系统版不存在），并设为根视觉
             _target = CompositionTarget.FromAbi(targetPtr);
             _target.Root = _root;
 
@@ -129,7 +131,7 @@ public sealed class DesktopWallpaperHost
         }
         catch (Exception ex)
         {
-            // 挂载失败（系统不支持/权限/原生崩溃等）：清理后返回 false，由上层重试。
+            // 挂载失败（系统不支持/权限/原生异常等）：清理后返回 false，由上层重试。
             // 注意：.NET Core 可捕获 AccessViolationException，不会让进程直接死掉。
             System.Diagnostics.Debug.WriteLine($"[DesktopWallpaperHost] 挂载失败: {ex}");
             Teardown();

@@ -9,12 +9,17 @@ using JellyWallpaper.Core.Physics;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.UI.Composition;
 using Microsoft.Graphics.DirectX;
-using Microsoft.UI.Composition;
-using Microsoft.UI.Dispatching;
+using Windows.System;
 using Windows.UI;
+using Windows.UI.Composition;
 // 屏幕像素矩形（屏幕边界 / 布局计算）：显式别名消除歧义
 // （System.Drawing.Rectangle vs System.Windows.Shapes.Rectangle）
 using Rectangle = System.Drawing.Rectangle;
+// 系统版 CompositionGraphicsDevice.CreateDrawingSurface 的参数枚举在
+// Windows.Graphics.DirectX（与 Win2D 的 Microsoft.Graphics.DirectX 同名），
+// 用别名区分：Sys* 用于系统版 API，裸名用于 Win2D API。
+using SysPixelFormat = Windows.Graphics.DirectX.DirectXPixelFormat;
+using SysAlphaMode = Windows.Graphics.DirectX.DirectXAlphaMode;
 
 namespace JellyWallpaper.App.Composition;
 
@@ -92,10 +97,11 @@ public sealed class MonitorRenderLayer : IDisposable
         _graphicsDevice = CanvasComposition.CreateCompositionGraphicsDevice(compositor, _device);
 
         // ② GPU 组合绘制表面（物理像素尺寸；B8G8R8A8 + 预乘 Alpha）
-        _surface = _graphicsDevice.CreateDrawingSurface2(
-            new Windows.Graphics.SizeInt32(Bounds.Width, Bounds.Height),
-            DirectXPixelFormat.B8G8R8A8UIntNormalized,
-            DirectXAlphaMode.Premultiplied);
+        //   系统版 API：CreateDrawingSurface(Size, Windows.Graphics.DirectX 枚举)
+        _surface = _graphicsDevice.CreateDrawingSurface(
+            new Windows.Foundation.Size(Bounds.Width, Bounds.Height),
+            SysPixelFormat.B8G8R8A8UIntNormalized,
+            SysAlphaMode.Premultiplied);
 
         // ③ 表面画笔 → 精灵视觉（视觉尺寸/偏移用 DIP，与合成坐标一致）
         _brush = compositor.CreateSurfaceBrush();
