@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    物理引擎自测（控制台程序，可在任意平台运行，包括 CI/Linux）。
+    运行方式：dotnet run -p src/JellyWallpaper.Core.Tests
+    验证内容：
+      1) 静止平衡：无外力时网格保持静止（弹簧力/锚点力/阻尼合力为零）；
+      2) 拖拽形变 + 最大位移钳制生效；
+      3) 松手回弹：位移能量单调收敛到接近零（果冻回弹）；
+      4) 过阻尼快速收敛：Damping=0.95 时无震荡、最快回位；
+      5) 参数实时生效：中途修改刚度/阻尼后行为立即改变。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>JellyWallpaper.Core.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\JellyWallpaper.Core\JellyWallpaper.Core.csproj" />
+  </ItemGroup>
+
+</Project>

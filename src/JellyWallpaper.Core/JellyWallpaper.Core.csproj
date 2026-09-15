@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    果冻壁纸 - 纯 C# 核心库
+    =====================================================================
+    本工程只包含"与 Windows API 无关"的纯逻辑：
+      * 弹簧-质点物理引擎（SpringMassGrid / MassPoint / PhysicsParams）
+      * 配置模型与 JSON 持久化（AppConfig）
+    因此它可以运行在任何平台（包括 CI/Linux），
+    便于做单元测试与物理参数调优；Windows 专属代码全部放在
+    JellyWallpaper.App 工程中。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>JellyWallpaper.Core</RootNamespace>
+    <AssemblyName>JellyWallpaper.Core</AssemblyName>
+  </PropertyGroup>
+
+</Project>

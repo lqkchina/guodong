@@ -1,0 +1,12 @@
+<Application x:Class="JellyWallpaper.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+    <!--
+      入口：不使用 StartupUri，全部生命周期在 App.xaml.cs 中手动管理：
+      单实例互斥体 → 创建合成线程(DispatcherQueue) → 启动壁纸管理器 → 显示设置窗口。
+      ShutdownMode=OnExplicitShutdown：关闭设置窗口只隐藏到托盘，程序常驻。
+    -->
+    <Application.Resources>
+    </Application.Resources>
+</Application>

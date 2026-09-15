@@ -1,0 +1,213 @@
+using System.Drawing;
+using System.Windows.Forms;
+using JellyWallpaper.App.Desktop;
+using JellyWallpaper.App.Lifecycle;
+using JellyWallpaper.App.Native;
+using JellyWallpaper.App.Simulation;
+using JellyWallpaper.App.Wallpaper;
+using JellyWallpaper.Core.Config;
+using Microsoft.Graphics.Canvas;
+using Microsoft.UI.Dispatching;
+
+namespace JellyWallpaper.App.Composition;
+
+/// <summary>
+/// 壁纸层总管理器 —— 所有模块的装配与生命周期中枢。
+///
+/// 线程模型（三层，各自解耦）：
+///   ① 主线程（WPF）：设置 UI，读写 AppConfig；
+///   ② 合成线程（专用 DispatcherQueue 线程）：Compositor / Win2D / 渲染，
+///      所有 Composition 对象与渲染循环都在这里；
+///   ③ 物理线程（SimulationLoop）：60FPS 固定步长模拟，只写网格快照。
+///
+/// 职责：
+///   * 启动合成线程，初始化 DWM 桌面合成宿主（挂到 Progman）；
+///   * 为每块屏幕创建独立 MonitorRenderLayer（视觉/交换链/网格实例）；
+///   * 接线：壁纸变化 → 异步加载纹理；explorer 重启 → 销毁并重建合成层；
+///   * 向设置窗口暴露 Config 以便实时调参。
+/// </summary>
+public sealed class WallpaperLayerManager : IDisposable
+{
+    private readonly AppConfig _config;
+    private readonly DispatcherQueueController _queueController;
+    private readonly DispatcherQueue _queue;
+    private readonly DesktopWallpaperHost _host = new();
+    private readonly CanvasDevice _device;
+    private readonly SimulationLoop _simulation;
+    private readonly WallpaperWatcher _wallpaperWatcher;
+    private readonly ExplorerWatcher _explorerWatcher;
+
+    /// <summary>当前所有屏幕的渲染层（物理线程每帧读取；重建时整体替换引用）</summary>
+    private volatile IReadOnlyList<MonitorRenderLayer> _layers = Array.Empty<MonitorRenderLayer>();
+    private volatile bool _disposed;
+
+    /// <summary>渲染层集合（供物理线程遍历步进）</summary>
+    public IReadOnlyList<MonitorRenderLayer> Layers => _layers;
+
+    /// <summary>配置对象（设置窗口直接修改，物理/渲染线程每帧读取最新值）</summary>
+    public AppConfig Config => _config;
+
+    /// <summary>桌面合成是否已就绪（供 UI 显示状态）</summary>
+    public bool HostReady => _host.IsInitialized;
+
+    public WallpaperLayerManager(AppConfig config)
+    {
+        _config = config;
+
+        // ① 专用合成线程：所有 Composition/Win2D 对象必须在这里创建
+        _queueController = DispatcherQueueController.CreateOnDedicatedThread();
+        _queue = _queueController.DispatcherQueue;
+
+        // 共享 GPU 设备（Win2D 官方推荐，避免每层重复创建设备）
+        _device = CanvasDevice.GetSharedDevice();
+
+        _simulation = new SimulationLoop(this, config);
+        _wallpaperWatcher = new WallpaperWatcher(config, Screen.AllScreens.Length);
+        _explorerWatcher = new ExplorerWatcher();
+    }
+
+    /// <summary>启动全部子系统（在主线程调用）</summary>
+    public void Start()
+    {
+        _queue.TryEnqueue(InitializeOnCompositorThread);
+
+        _simulation.Start();
+
+        _wallpaperWatcher.WallpaperChanged += OnWallpaperChanged;
+        _wallpaperWatcher.Start();
+
+        _explorerWatcher.ExplorerRestarted += OnExplorerRestarted;
+        _explorerWatcher.Start();
+    }
+
+    /// <summary>设置窗口修改了壁纸相关开关（跟随系统壁纸）后，立即重新应用</summary>
+    public void RefreshWallpaper()
+    {
+        _queue.TryEnqueue(() =>
+        {
+            if (_disposed) return;
+            var infos = WallpaperSource.ReadAllMonitors(_layers.Count);
+            ApplyWallpaperInfos(infos);
+        });
+    }
+
+    // ── 合成线程：初始化 + 建层 ────────────────────────────────────────
+    private void InitializeOnCompositorThread()
+    {
+        if (_disposed) return;
+
+        if (_host.Initialize())
+        {
+            BuildLayers();
+        }
+        else
+        {
+            // explorer 尚未就绪：1 秒后重试（开机启动/explorer 重启初期）
+            var retry = _queue.CreateTimer();
+            retry.Interval = TimeSpan.FromSeconds(1);
+            retry.IsRepeating = false;
+            retry.Tick += (s, e) =>
+            {
+                retry.Stop();
+                InitializeOnCompositorThread();
+            };
+            retry.Start();
+        }
+    }
+
+    /// <summary>销毁旧层并按当前屏幕布局重建（explorer 重启 / 初次建层时调用）</summary>
+    private void BuildLayers()
+    {
+        foreach (var old in _layers)
+            old.Dispose();
+
+        var list = new List<MonitorRenderLayer>(Screen.AllScreens.Length);
+        foreach (var screen in Screen.AllScreens)
+        {
+            Rectangle bounds = screen.Bounds;
+            float dpi = GetMonitorDpi(bounds);
+
+            var layer = new MonitorRenderLayer(_host, _config, _device, _queue, bounds, dpi);
+            layer.CreateVisual();
+            list.Add(layer);
+        }
+        _layers = list;
+
+        // 建层后立即应用当前壁纸
+        var infos = WallpaperSource.ReadAllMonitors(list.Count);
+        ApplyWallpaperInfos(infos);
+    }
+
+    /// <summary>把壁纸信息逐个推给对应屏幕层（异步加载纹理，不阻塞渲染）</summary>
+    private void ApplyWallpaperInfos(IReadOnlyList<WallpaperImageInfo> infos)
+    {
+        var layers = _layers;
+        for (int i = 0; i < Math.Min(layers.Count, infos.Count); i++)
+        {
+            int idx = i;
+            var info = infos[i];
+            _queue.TryEnqueue(() =>
+            {
+                if (_disposed || idx >= _layers.Count) return;
+                _layers[idx].UpdateWallpaper(info);
+            });
+        }
+    }
+
+    // ── 事件接线 ──────────────────────────────────────────────────────
+    private void OnWallpaperChanged(IReadOnlyList<WallpaperImageInfo> infos)
+        => ApplyWallpaperInfos(infos);
+
+    /// <summary>explorer 重启：销毁旧 DWM 合成层，重建图层与渲染资源</summary>
+    private void OnExplorerRestarted()
+    {
+        _queue.TryEnqueue(() =>
+        {
+            if (_disposed) return;
+            _host.Teardown();          // 旧合成目标已随 explorer 消亡
+            InitializeOnCompositorThread(); // 重新挂载 + 重建所有屏幕层
+        });
+    }
+
+    /// <summary>获取指定屏幕的 DPI（物理像素口径，PerMonitorV2）</summary>
+    private static float GetMonitorDpi(Rectangle bounds)
+    {
+        try
+        {
+            var pt = new NativeMethods.POINT
+            {
+                X = bounds.X + bounds.Width / 2,
+                Y = bounds.Y + bounds.Height / 2
+            };
+            IntPtr hmon = NativeMethods.MonitorFromPoint(pt, NativeMethods.MONITOR_DEFAULTTONEAREST);
+            if (hmon != IntPtr.Zero &&
+                NativeMethods.GetDpiForMonitor(hmon, NativeMethods.MonitorDpiType.Effective,
+                                               out uint dpiX, out _) == 0)
+            {
+                return dpiX;
+            }
+        }
+        catch { /* 回退 96 */ }
+        return 96f;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        _explorerWatcher.Dispose();
+        _wallpaperWatcher.Dispose();
+        _simulation.Dispose();
+
+        // 合成线程上释放所有 GPU 资源并关闭队列线程
+        _queue.TryEnqueue(() =>
+        {
+            foreach (var layer in _layers)
+                layer.Dispose();
+            _layers = Array.Empty<MonitorRenderLayer>();
+            _host.Teardown();
+            _ = _queueController.ShutdownQueueAsync();
+        });
+    }
+}
