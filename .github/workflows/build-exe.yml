@@ -17,18 +17,11 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: 安装 VS2022 MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      - name: 编译并收集发布目录
+      - name: 发布（官方流程，目录版免安装）
         shell: pwsh
         run: |
-          msbuild src\JellyWallpaper.App\JellyWallpaper.App.csproj "/t:Restore;Build" /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:WindowsAppSDKSelfContained=true /p:WindowsPackageType=None /p:EnableMsixTooling=true /p:DebugType=embedded
-          $exe = Get-ChildItem -Path src\JellyWallpaper.App\bin -Recurse -Filter JellyWallpaper.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $exe) { Write-Error "[错误] 未找到 JellyWallpaper.exe"; exit 1 }
-          Write-Host "[发布] 运行目录: $($exe.DirectoryName)"
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item -Path (Join-Path $exe.DirectoryName '*') -Destination dist -Recurse -Force
+          dotnet publish src\JellyWallpaper.App\JellyWallpaper.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -p:WindowsAppSDKSelfContained=true -p:WindowsPackageType=None -p:EnableMsixTooling=true -p:DebugType=embedded -o dist
+          if (-not (Test-Path dist\JellyWallpaper.exe)) { Write-Error "[错误] 未生成 JellyWallpaper.exe"; exit 1 }
           Write-Host "[检查] dist 内容："
           Get-ChildItem dist | Select-Object Name, Length
 
