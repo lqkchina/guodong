@@ -17,18 +17,15 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      # 关键修复：WinAppSDK 单文件发布必须用 VS2022 的 MSBuild
+      #（dotnet CLI 缺少 VS 的 PRI/AppxPackage 构建任务，会报 MSB4062）
+      - name: 安装 VS2022 MSBuild
+        uses: microsoft/setup-msbuild@v2
+
       - name: 发布独立单文件 EXE
+        shell: cmd
         run: |
-          dotnet publish src/JellyWallpaper.App/JellyWallpaper.App.csproj `
-            -c Release `
-            -r win-x64 `
-            --self-contained true `
-            -p:PublishSingleFile=true `
-            -p:IncludeNativeLibrariesForSelfExtract=true `
-            -p:EnableCompressionInSingleFile=true `
-            -p:WindowsAppSDKSelfContained=true `
-            -p:WindowsPackageType=None `
-            -o dist
+          msbuild src\JellyWallpaper.App\JellyWallpaper.App.csproj /t:Restore /t:Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true /p:EnableCompressionInSingleFile=true /p:WindowsAppSDKSelfContained=true /p:WindowsPackageType=None /p:EnableMsixTooling=true /p:PublishDir=dist\ /p:DebugType=embedded
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
