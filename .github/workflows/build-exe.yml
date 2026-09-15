@@ -17,24 +17,27 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      # WinAppSDK 单文件发布必须用 VS2022 的 MSBuild（dotnet CLI 缺构建任务）
       - name: 安装 VS2022 MSBuild
         uses: microsoft/setup-msbuild@v2
 
       - name: 发布独立单文件 EXE
-        shell: cmd
+        shell: pwsh
         run: |
-          msbuild src\JellyWallpaper.App\JellyWallpaper.App.csproj /t:Restore;Publish /p:Configuration=Release /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true /p:EnableCompressionInSingleFile=true /p:WindowsAppSDKSelfContained=true /p:WindowsPackageType=None /p:EnableMsixTooling=true /p:PublishDir=dist\ /p:DebugType=embedded
-          rem 兜底：万一 PublishDir 未生效，从默认目录拷贝产物
-          if not exist dist\JellyWallpaper.exe (
-            echo [兜底] 从默认目录拷贝产物到 dist
-            if exist bin\Release\net8.0-windows10.0.19041.0\win-x64\publish\JellyWallpaper.exe (
-              mkdir dist
-              copy /y bin\Release\net8.0-windows10.0.19041.0\win-x64\publish\* dist\
-            )
-          )
-          echo [检查] dist 目录内容：
-          dir dist
+          msbuild src\JellyWallpaper.App\JellyWallpaper.App.csproj /t:Restore;Publish /p:Configuration=Release /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true /p:EnableCompressionInSingleFile=true /p:WindowsAppSDKSelfContained=true /p:WindowsPackageType=None /p:EnableMsixTooling=true /p:PublishDir=dist\ /p:DebugType=embedded
+          if (-not (Test-Path dist\JellyWallpaper.exe)) {
+            Write-Host "[兜底] dist 未生成，从 bin 目录搜索产物"
+            $exe = Get-ChildItem -Path bin -Recurse -Filter JellyWallpaper.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($exe) {
+              New-Item -ItemType Directory -Force dist | Out-Null
+              Copy-Item $exe.FullName dist\
+              Write-Host "[兜底] 已拷贝: $($exe.FullName)"
+            } else {
+              Write-Host "[错误] 未找到 JellyWallpaper.exe，bin 内容："
+              Get-ChildItem -Path bin -Recurse -ErrorAction SilentlyContinue | Select-Object FullName | Format-Table -AutoSize
+            }
+          }
+          Write-Host "[检查] dist 内容："
+          Get-ChildItem dist -ErrorAction SilentlyContinue | Select-Object Name, Length
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
