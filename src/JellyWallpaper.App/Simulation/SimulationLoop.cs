@@ -33,6 +33,9 @@ public sealed class SimulationLoop : IDisposable
     private Thread? _thread;
     private volatile bool _stop;
 
+    /// <summary>诊断信息：鼠标坐标 / 拖拽状态 / 命中图标 / 最大位移（UI 每秒显示）</summary>
+    public volatile string LastDragInfo = "物理线程未启动";
+
     public SimulationLoop(WallpaperLayerManager manager, AppConfig config)
     {
         _manager = manager;
@@ -107,6 +110,12 @@ public sealed class SimulationLoop : IDisposable
             grid.SetDrag(mouse.X - layer.Bounds.X, mouse.Y - layer.Bounds.Y, dragging);
             grid.Step(StepDt);
         }
+
+        // 诊断快照（UI 状态栏每秒显示；LastMaxDisplacement 由渲染层读取）
+        float maxDisp = 0f;
+        foreach (var l in _manager.Layers)
+            if (l.Grid != null) maxDisp = Math.Max(maxDisp, l.Grid.LastMaxDisplacement);
+        LastDragInfo = $"鼠标=({mouse.X},{mouse.Y}) 拖拽={(dragAllowed ? "是" : "否")} 命中图标={(overIcon ? "是" : "否")} 网格={layers.Count}块 位移={maxDisp:F1}px 效果={(dragAllowed ? "开" : "关")}";
     }
 
     public void Dispose()

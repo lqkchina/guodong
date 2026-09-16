@@ -80,7 +80,8 @@ public partial class MainWindow : Window
         if (_manager.HostReady)
         {
             TxtStatus.Text = "合成层状态：已挂载到桌面（壁纸 → 果冻层 → 图标）";
-            TxtStatusDetail.Text = "在桌面空白处按住左键拖拽即可看到果冻效果";
+            // 诊断行：FPS/纹理/拖拽/位移/窗口可见性 —— 拖拽无效果时一眼定位卡点
+            TxtStatusDetail.Text = _manager.Diagnostics;
         }
         else
         {

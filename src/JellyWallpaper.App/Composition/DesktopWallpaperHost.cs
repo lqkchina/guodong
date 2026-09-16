@@ -405,4 +405,16 @@ public sealed class DesktopWallpaperHost
         int vy = NativeMethods.GetSystemMetrics(NativeMethods.SM_YVIRTUALSCREEN);
         return new Point(vx, vy);
     }
+
+    /// <summary>自建壁纸窗口的可见性诊断（UI 状态栏显示：层是否真的在桌面上）</summary>
+    public string HostWindowInfo
+    {
+        get
+        {
+            if (_hostHwnd == IntPtr.Zero) return "壁纸窗口=未创建";
+            bool visible = NativeMethods.IsWindowVisible(_hostHwnd);
+            NativeMethods.GetWindowRect(_hostHwnd, out NativeMethods.RECT r);
+            return $"壁纸窗口=可见:{visible} {r.Width}x{r.Height} 父层=0x{_layerHwnd.ToInt64():X}";
+        }
+    }
 }

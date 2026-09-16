@@ -79,6 +79,21 @@ public sealed class MonitorRenderLayer : IDisposable
 
     private bool _disposed;
 
+    // ── 诊断状态（UI 状态栏每秒显示，用于定位"拖拽无效果"）────────────
+    private long _tickCount;              // 渲染帧累计
+    private long _fpsWindowStart = Environment.TickCount64;
+    private long _fpsWindowTicks;
+    private float _renderFps;
+
+    /// <summary>渲染帧率（最近 1 秒均值；0 = 渲染循环未跑/被跳过）</summary>
+    public float RenderFps => _renderFps;
+
+    /// <summary>最近一次渲染异常（BeginDraw/绘制失败时记录，不再静默吞掉）</summary>
+    public string? LastRenderError { get; private set; }
+
+    /// <summary>壁纸纹理状态（位图尺寸或"未加载"；未加载时显示纯色背景）</summary>
+    public string TextureInfo { get; private set; } = "未加载";
+
     public MonitorRenderLayer(DesktopWallpaperHost host, AppConfig config,
                               DispatcherQueue queue, Rectangle bounds, float dpi)
     {
@@ -192,6 +207,16 @@ public sealed class MonitorRenderLayer : IDisposable
         var interop = _surfaceInterop;
         if (_disposed || interop == null) return;
 
+        // 帧率统计（最近 1 秒均值，UI 状态栏显示）
+        _tickCount++;
+        long now = Environment.TickCount64;
+        if (now - _fpsWindowStart >= 1000)
+        {
+            _renderFps = (_tickCount - _fpsWindowTicks) * 1000f / (now - _fpsWindowStart);
+            _fpsWindowStart = now;
+            _fpsWindowTicks = _tickCount;
+        }
+
         try
         {
             // ① BeginDraw：请求 ID2D1DeviceContext（整个表面更新）
@@ -210,10 +235,13 @@ public sealed class MonitorRenderLayer : IDisposable
 
             // ③ 提交到合成表面（EndDraw 后 BeginDraw 返回的 ctx 指针失效）
             interop.EndDraw();
+            LastRenderError = null; // 本帧成功，清除历史错误提示
         }
-        catch
+        catch (Exception ex)
         {
-            // 单帧失败（GPU 资源丢失/尺寸异常）：跳过本帧，不崩溃
+            // 单帧失败（GPU 资源丢失/尺寸异常）：跳过本帧，不崩溃，
+            // 但记录原因（状态栏显示，避免"静默无效果"）
+            LastRenderError = $"{ex.GetType().Name}: {ex.Message}";
         }
     }
 
@@ -329,6 +357,7 @@ public sealed class MonitorRenderLayer : IDisposable
             _wallpaperW = w;
             _wallpaperH = h;
             _source = info;
+            TextureInfo = $"{w}x{h}";
         }
         finally
         {

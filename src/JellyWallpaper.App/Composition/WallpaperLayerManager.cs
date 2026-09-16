@@ -68,6 +68,23 @@ public sealed class WallpaperLayerManager : IDisposable
     /// <summary>最近一次挂载失败的详细原因（UI 状态栏显示，用于快速定位）</summary>
     public string? LastInitError => _host.LastError;
 
+    /// <summary>
+    /// 运行时诊断汇总（UI 状态栏每秒显示）：
+    /// 渲染 FPS / 纹理 / 鼠标拖拽 / 网格位移 / 壁纸窗口可见性。
+    /// 用于定位"能打开但拖拽没效果"的具体环节。
+    /// </summary>
+    public string Diagnostics
+    {
+        get
+        {
+            var layers = _layers;
+            if (layers.Count == 0) return "无渲染层（尚未挂载完成）";
+            var l = layers[0];
+            string renderErr = l.LastRenderError ?? "";
+            return $"FPS={l.RenderFps:F0} 纹理={l.TextureInfo} {_simulation.LastDragInfo} {_host.HostWindowInfo}{(renderErr.Length > 0 ? " 渲染异常:" + renderErr : "")}";
+        }
+    }
+
     public WallpaperLayerManager(AppConfig config)
     {
         _config = config;
