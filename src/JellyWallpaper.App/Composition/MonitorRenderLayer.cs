@@ -265,60 +265,76 @@ public sealed class MonitorRenderLayer : IDisposable
             _fpsWindowTicks = _tickCount;
         }
 
-        // ① BeginDraw：手写 vtable 调用（零封送），v5.12 三路径自愈：
-        //    路径① updateRect=NULL + ID2D1DeviceContext iid（文档标准）
-        //    路径② updateRect=NULL + ID2D1Device iid（部分系统版只认设备）
-        //           → 手写 CreateDeviceContext 得到绘制上下文
-        //    路径③ updateRect=整个表面 RECT + ID2D1DeviceContext iid
+        // ① BeginDraw：手写 vtable 调用（零封送），v5.13 组合矩阵全试，谁给非空
+        //    绘制对象就用谁（v5.12 实证：NULL 矩形被拒 0x80004003，RECT 成功
+        //    S_OK；剩下唯一未试组合 = RECT + 设备 iid，最符合系统版老用法）。
+        //    组合顺序：A) NULL+DC  B) RECT+DC  C) RECT+Dev→CreateDeviceContext
         IntPtr ctxPtr = IntPtr.Zero;
         IntPtr comPtr = _surfaceComPtr;
         var iidDc = CompositionInterop.IID_ID2D1DeviceContext;
+        var iidDev = new Guid("47DD575D-AC05-4CDD-8049-9B02D16F5C6E");
         string path;
 
-        int hr1 = CompositionInterop.RawBeginDraw(comPtr, IntPtr.Zero, iidDc, out ctxPtr, out _);
-        if (hr1 >= 0 && ctxPtr != IntPtr.Zero)
+        // A) NULL + DC（v5.12 已知 E_POINTER，保留用于显示）
+        IntPtr ctxA = IntPtr.Zero;
+        int hrA = CompositionInterop.RawBeginDraw(comPtr, IntPtr.Zero, iidDc, out ctxA, out _);
+
+        // B) RECT + DC（v5.12 已知 S_OK；检查对象指针是否非空）
+        IntPtr ctxB = IntPtr.Zero;
+        int hrB = unchecked((int)0x80004005); // E_FAIL 占位
+        var rect = new RECTSTRUCT { Left = 0, Top = 0, Right = Bounds.Width, Bottom = Bounds.Height };
+        var rGch = System.Runtime.InteropServices.GCHandle.Alloc(rect, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
         {
-            path = "①DC";
+            hrB = CompositionInterop.RawBeginDraw(comPtr, rGch.AddrOfPinnedObject(), iidDc, out ctxB, out _);
+        }
+        finally
+        {
+            rGch.Free();
+        }
+
+        // C) RECT + Dev → CreateDeviceContext（最有希望的组合）
+        IntPtr devPtr = IntPtr.Zero;
+        int hrC = unchecked((int)0x80004005);
+        var rGch2 = System.Runtime.InteropServices.GCHandle.Alloc(rect, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
+        {
+            hrC = CompositionInterop.RawBeginDraw(comPtr, rGch2.AddrOfPinnedObject(), iidDev, out devPtr, out _);
+        }
+        finally
+        {
+            rGch2.Free();
+        }
+
+        if (hrC >= 0 && devPtr != IntPtr.Zero)
+        {
+            // C 成功：设备 → 设备上下文（绘制用）
+            int hrD = CompositionInterop.RawCreateDeviceContext(devPtr, out ctxPtr);
+            if (hrD < 0 || ctxPtr == IntPtr.Zero)
+            {
+                Marshal.Release(devPtr);
+                LastRenderError = $"RECT+Dev 成功但 Dev→Ctx=0x{hrD:X8}";
+                return;
+            }
+            _devPtrToRelease = devPtr; // EndDraw 后释放
+            path = "RECT+Dev";
+        }
+        else if (hrB >= 0 && ctxB != IntPtr.Zero)
+        {
+            ctxPtr = ctxB;
+            path = "RECT+DC";
+        }
+        else if (hrA >= 0 && ctxA != IntPtr.Zero)
+        {
+            ctxPtr = ctxA;
+            path = "NULL+DC";
         }
         else
         {
-            // 路径②：设备 iid → 设备上下文
-            IntPtr devPtr = IntPtr.Zero;
-            int hr2 = CompositionInterop.RawBeginDraw(comPtr, IntPtr.Zero,
-                new Guid("47DD575D-AC05-4CDD-8049-9B02D16F5C6E"), out devPtr, out _);
-            if (hr2 >= 0 && devPtr != IntPtr.Zero)
-            {
-                int hrC = CompositionInterop.RawCreateDeviceContext(devPtr, out ctxPtr);
-                if (hrC < 0 || ctxPtr == IntPtr.Zero)
-                {
-                    Marshal.Release(devPtr);
-                    LastRenderError = $"路径②失败 Dev→Ctx=0x{hrC:X8}";
-                    return;
-                }
-                _devPtrToRelease = devPtr; // EndDraw 后释放（BeginDraw 返回的引用）
-                path = "②Dev";
-            }
-            else
-            {
-                // 路径③：显式 RECT
-                var rect = new RECTSTRUCT { Left = 0, Top = 0, Right = Bounds.Width, Bottom = Bounds.Height };
-                var rGch = System.Runtime.InteropServices.GCHandle.Alloc(rect, System.Runtime.InteropServices.GCHandleType.Pinned);
-                int hr3;
-                try
-                {
-                    hr3 = CompositionInterop.RawBeginDraw(comPtr, rGch.AddrOfPinnedObject(), iidDc, out ctxPtr, out _);
-                }
-                finally
-                {
-                    rGch.Free();
-                }
-                if (hr3 < 0 || ctxPtr == IntPtr.Zero)
-                {
-                    LastRenderError = $"BeginDraw全失败 ①=0x{hr1:X8} ②=0x{hr2:X8} ③=0x{hr3:X8} d2d=0x{_ownerDevicePtr:X}";
-                    return;
-                }
-                path = "③RECT";
-            }
+            // 设备链验证：对底层 D2D 设备手写 CreateDeviceContext（探测设备是否有效）
+            int hrDev = CompositionInterop.RawCreateDeviceContext(_ownerDevicePtr, out _);
+            LastRenderError = $"BeginDraw全失败 A=0x{hrA:X8} B=0x{hrB:X8} C=0x{hrC:X8} 设备探测=0x{hrDev:X8} d2d=0x{_ownerDevicePtr:X}";
+            return;
         }
         _renderPath = path;
         _useRawSurfaceCalls = true;
