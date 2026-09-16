@@ -72,4 +72,14 @@
     <ProjectReference Include="..\JellyWallpaper.Core\JellyWallpaper.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!--
+      排除历史遗留的 Render 目录：v3（Win2D 版）的旧渲染文件
+      MeshRenderer.cs 引用了已移除的 Win2D 库。若仓库中仍存在该文件，
+      不参与编译（防止 CS0234/CS0246）。当前渲染实现在
+      Composition/MonitorRenderLayer.cs。
+    -->
+    <Compile Remove="Render\**\*.cs" />
+  </ItemGroup>
+
 </Project>
