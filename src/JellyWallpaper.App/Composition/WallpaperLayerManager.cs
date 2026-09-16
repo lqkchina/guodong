@@ -183,7 +183,7 @@ public sealed class WallpaperLayerManager : IDisposable
             Rectangle bounds = screen.Bounds;
             float dpi = GetMonitorDpi(bounds);
 
-            var layer = new MonitorRenderLayer(_host, _config, _queue, bounds, dpi);
+            var layer = new MonitorRenderLayer(_host, _config, _queue, bounds, dpi, _d2dDevicePtr);
             layer.CreateVisual();
             list.Add(layer);
         }

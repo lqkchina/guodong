@@ -179,3 +179,13 @@ public struct POINTSTRUCT
     public int X;
     public int Y;
 }
+
+/// <summary>与 Win32 RECT 布局一致的结构（裸调用 updateRect 参数用）</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct RECTSTRUCT
+{
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+}

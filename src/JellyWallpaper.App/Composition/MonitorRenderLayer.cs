@@ -106,14 +106,18 @@ public sealed class MonitorRenderLayer : IDisposable
     public volatile string? DecodeError;
 
     public MonitorRenderLayer(DesktopWallpaperHost host, AppConfig config,
-                              DispatcherQueue queue, Rectangle bounds, float dpi)
+                              DispatcherQueue queue, Rectangle bounds, float dpi, IntPtr ownerDevicePtr)
     {
         _host = host;
         _config = config;
         _queue = queue;
         Bounds = bounds;
         Dpi = dpi;
+        _ownerDevicePtr = ownerDevicePtr;
     }
+
+    /// <summary>所属 Composition 图形设备的底层 D2D 设备指针（诊断显示，非空即有效）</summary>
+    private readonly IntPtr _ownerDevicePtr;
 
     /// <summary>
     /// 在合成线程创建绘制表面 + 画笔视觉并启动渲染定时器。
@@ -243,15 +247,36 @@ public sealed class MonitorRenderLayer : IDisposable
         }
 
         // ① BeginDraw：请求 ID2D1DeviceContext（整个表面更新）。
-        //    裸调用（[PreserveSig] + pinned Guid 指针），失败时拿到原始 HRESULT。
-        //    若失败，再探测 ID2D1Device iid —— 用于确认"系统版是否只认设备 iid"。
-        IntPtr ctxPtr;
-        int hr = BeginDrawRaw(CompositionInterop.IID_ID2D1DeviceContext, out ctxPtr);
-        if (hr < 0)
+        //    裸调用（[PreserveSig] + pinned Guid 指针）取原始 HRESULT。
+        //    v5.10 三组组合探测，一次定性"参数问题 or 表面问题"：
+        //      A) updateRect=NULL           （文档标准用法）
+        //      B) updateRect=整个表面 RECT  （排除 NULL 不被系统版接受）
+        //      C) Resize 试探                （排除表面本身无效/已销毁）
+        IntPtr ctxPtr = IntPtr.Zero;
+        var iidDc = CompositionInterop.IID_ID2D1DeviceContext;
+        int hrA = BeginDrawRaw(IntPtr.Zero, iidDc, out ctxPtr);
+        if (hrA < 0)
         {
-            int hrDev = BeginDrawRaw(new Guid("47DD575D-AC05-4CDD-8049-9B02D16F5C6E"), out _);
-            LastRenderError = $"BeginDraw失败 DC-iid=0x{hr:X8} Dev-iid=0x{hrDev:X8}";
-            return;
+            // A 失败 → 试组合 B（显式整个表面 RECT）
+            var rect = new RECTSTRUCT { Left = 0, Top = 0, Right = Bounds.Width, Bottom = Bounds.Height };
+            var rGch = System.Runtime.InteropServices.GCHandle.Alloc(rect, System.Runtime.InteropServices.GCHandleType.Pinned);
+            int hrB;
+            try
+            {
+                hrB = BeginDrawRaw(rGch.AddrOfPinnedObject(), iidDc, out ctxPtr);
+            }
+            finally
+            {
+                rGch.Free();
+            }
+            if (hrB < 0)
+            {
+                // B 也失败 → 试组合 C：Resize 试探（表面是否有效）
+                var raw = _surfaceInteropRaw;
+                int hrC = raw?.Resize(Bounds.Width, Bounds.Height) ?? unchecked((int)0x80004003);
+                LastRenderError = $"BeginDraw失败 NULL=0x{hrA:X8} RECT=0x{hrB:X8} Resize=0x{hrC:X8} d2d=0x{_ownerDevicePtr:X}";
+                return;
+            }
         }
         if (ctxPtr == IntPtr.Zero)
         {
@@ -296,7 +321,7 @@ public sealed class MonitorRenderLayer : IDisposable
     }
 
     /// <summary>BeginDraw 裸调用：pinned Guid 指针传 iid，返回原始 HRESULT</summary>
-    private int BeginDrawRaw(Guid iid, out IntPtr ctxPtr)
+    private int BeginDrawRaw(IntPtr updateRectPtr, Guid iid, out IntPtr ctxPtr)
     {
         ctxPtr = IntPtr.Zero;
         var raw = _surfaceInteropRaw;
@@ -304,7 +329,7 @@ public sealed class MonitorRenderLayer : IDisposable
         var gch = System.Runtime.InteropServices.GCHandle.Alloc(iid, System.Runtime.InteropServices.GCHandleType.Pinned);
         try
         {
-            return raw.BeginDraw(IntPtr.Zero, gch.AddrOfPinnedObject(), out ctxPtr, out _);
+            return raw.BeginDraw(updateRectPtr, gch.AddrOfPinnedObject(), out ctxPtr, out _);
         }
         finally
         {
