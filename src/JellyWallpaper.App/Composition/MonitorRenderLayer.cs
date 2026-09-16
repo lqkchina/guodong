@@ -265,76 +265,49 @@ public sealed class MonitorRenderLayer : IDisposable
             _fpsWindowTicks = _tickCount;
         }
 
-        // ① BeginDraw：手写 vtable 调用（零封送），v5.13 组合矩阵全试，谁给非空
-        //    绘制对象就用谁（v5.12 实证：NULL 矩形被拒 0x80004003，RECT 成功
-        //    S_OK；剩下唯一未试组合 = RECT + 设备 iid，最符合系统版老用法）。
-        //    组合顺序：A) NULL+DC  B) RECT+DC  C) RECT+Dev→CreateDeviceContext
+        // ① BeginDraw：手写 vtable 调用（零封送），v5.14：
+        //    v5.13 实证 RECT 路径 S_OK、设备探测 S_OK，但 out 对象指针为空
+        //    → 怀疑 out POINTSTRUCT（第 5 参数）在 x64 调用约定下干扰了
+        //    updateObject 写入。本版主路径 = RECT + DC-iid + updateOffset=NULL
+        //    （原生允许 NULL），若成功即修复；失败则对比旧调用。
         IntPtr ctxPtr = IntPtr.Zero;
         IntPtr comPtr = _surfaceComPtr;
         var iidDc = CompositionInterop.IID_ID2D1DeviceContext;
-        var iidDev = new Guid("47DD575D-AC05-4CDD-8049-9B02D16F5C6E");
         string path;
 
-        // A) NULL + DC（v5.12 已知 E_POINTER，保留用于显示）
-        IntPtr ctxA = IntPtr.Zero;
-        int hrA = CompositionInterop.RawBeginDraw(comPtr, IntPtr.Zero, iidDc, out ctxA, out _);
-
-        // B) RECT + DC（v5.12 已知 S_OK；检查对象指针是否非空）
-        IntPtr ctxB = IntPtr.Zero;
-        int hrB = unchecked((int)0x80004005); // E_FAIL 占位
         var rect = new RECTSTRUCT { Left = 0, Top = 0, Right = Bounds.Width, Bottom = Bounds.Height };
         var rGch = System.Runtime.InteropServices.GCHandle.Alloc(rect, System.Runtime.InteropServices.GCHandleType.Pinned);
+        int hrMain;
         try
         {
-            hrB = CompositionInterop.RawBeginDraw(comPtr, rGch.AddrOfPinnedObject(), iidDc, out ctxB, out _);
+            hrMain = CompositionInterop.RawBeginDrawNoOffset(comPtr, rGch.AddrOfPinnedObject(), iidDc, out ctxPtr);
         }
         finally
         {
             rGch.Free();
         }
 
-        // C) RECT + Dev → CreateDeviceContext（最有希望的组合）
-        IntPtr devPtr = IntPtr.Zero;
-        int hrC = unchecked((int)0x80004005);
-        var rGch2 = System.Runtime.InteropServices.GCHandle.Alloc(rect, System.Runtime.InteropServices.GCHandleType.Pinned);
-        try
+        if (hrMain >= 0 && ctxPtr != IntPtr.Zero)
         {
-            hrC = CompositionInterop.RawBeginDraw(comPtr, rGch2.AddrOfPinnedObject(), iidDev, out devPtr, out _);
-        }
-        finally
-        {
-            rGch2.Free();
-        }
-
-        if (hrC >= 0 && devPtr != IntPtr.Zero)
-        {
-            // C 成功：设备 → 设备上下文（绘制用）
-            int hrD = CompositionInterop.RawCreateDeviceContext(devPtr, out ctxPtr);
-            if (hrD < 0 || ctxPtr == IntPtr.Zero)
-            {
-                Marshal.Release(devPtr);
-                LastRenderError = $"RECT+Dev 成功但 Dev→Ctx=0x{hrD:X8}";
-                return;
-            }
-            _devPtrToRelease = devPtr; // EndDraw 后释放
-            path = "RECT+Dev";
-        }
-        else if (hrB >= 0 && ctxB != IntPtr.Zero)
-        {
-            ctxPtr = ctxB;
-            path = "RECT+DC";
-        }
-        else if (hrA >= 0 && ctxA != IntPtr.Zero)
-        {
-            ctxPtr = ctxA;
-            path = "NULL+DC";
+            path = "RECT+DC+NoOff";
         }
         else
         {
-            // 设备链验证：对底层 D2D 设备手写 CreateDeviceContext（探测设备是否有效）
-            int hrDev = CompositionInterop.RawCreateDeviceContext(_ownerDevicePtr, out _);
-            LastRenderError = $"BeginDraw全失败 A=0x{hrA:X8} B=0x{hrB:X8} C=0x{hrC:X8} 设备探测=0x{hrDev:X8} d2d=0x{_ownerDevicePtr:X}";
-            return;
+            // 对比：带 offset 的旧调用（v5.13 行为）
+            IntPtr ctxOld = IntPtr.Zero;
+            int hrOld = CompositionInterop.RawBeginDraw(comPtr, IntPtr.Zero, iidDc, out ctxOld, out _);
+            if (hrOld >= 0 && ctxOld != IntPtr.Zero)
+            {
+                ctxPtr = ctxOld;
+                path = "NULL+DC+Off";
+            }
+            else
+            {
+                // 设备链验证（CreateDeviceContext 成功 = 设备有效）
+                int hrDev = CompositionInterop.RawCreateDeviceContext(_ownerDevicePtr, out _);
+                LastRenderError = $"BeginDraw NoOff=0x{hrMain:X8} Off=0x{hrOld:X8} 设备探测=0x{hrDev:X8} d2d=0x{_ownerDevicePtr:X}";
+                return;
+            }
         }
         _renderPath = path;
         _useRawSurfaceCalls = true;

@@ -71,6 +71,9 @@ public static class CompositionInterop
     private delegate int FnBeginDraw(IntPtr self, IntPtr updateRect, IntPtr iid, out IntPtr updateObject, out POINTSTRUCT updateOffset);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int FnBeginDrawNoOffset(IntPtr self, IntPtr updateRect, IntPtr iid, out IntPtr updateObject);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int FnEndDraw(IntPtr self);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -103,6 +106,28 @@ public static class CompositionInterop
         IntPtr fn = Marshal.ReadIntPtr(Marshal.ReadIntPtr(surfaceComPtr), 4 * IntPtr.Size);
         var del = Marshal.GetDelegateForFunctionPointer<FnEndDraw>(fn);
         return del(surfaceComPtr);
+    }
+
+    /// <summary>
+    /// BeginDraw 的"无 offset"变体（v5.14）：updateOffset 参数传 NULL 指针。
+    /// 原生签名允许 updateOffset 为 NULL；排除 out POINTSTRUCT 在 x64
+    /// 调用约定下的栈布局对 updateObject 写入的干扰。
+    /// </summary>
+    public static int RawBeginDrawNoOffset(IntPtr surfaceComPtr, IntPtr updateRect, Guid iid, out IntPtr updateObject)
+    {
+        updateObject = IntPtr.Zero;
+        if (surfaceComPtr == IntPtr.Zero) return unchecked((int)0x80004003);
+        IntPtr fn = Marshal.ReadIntPtr(Marshal.ReadIntPtr(surfaceComPtr), 3 * IntPtr.Size);
+        var del = Marshal.GetDelegateForFunctionPointer<FnBeginDrawNoOffset>(fn);
+        var gch = System.Runtime.InteropServices.GCHandle.Alloc(iid, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
+        {
+            return del(surfaceComPtr, updateRect, gch.AddrOfPinnedObject(), out updateObject);
+        }
+        finally
+        {
+            gch.Free();
+        }
     }
 
     /// <summary>
