@@ -40,26 +40,48 @@ public sealed record WallpaperImageInfo(string? Path, byte[]? EmbeddedBmp,
 /// </summary>
 public static class WallpaperSource
 {
+    // 路径匹配放宽：不再限定扩展名（Windows 聚焦的缓存文件无扩展名），
+    // 匹配"盘符:\"开头的路径串，随后用 File.Exists 做存在性验证。
     private static readonly Regex PathRegex = new(
-        @"[A-Za-z]:\\[^\u0000\ud800-\udfff]{1,512}\.(jpg|jpeg|png|bmp|jfif)",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"[A-Za-z]:\\[^\u0000-\u001f\u007f]{3,512}",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// 最近一次读取的诊断摘要（UI 状态栏显示，定位"纹理=未加载"用）：
+    /// 记录每块屏幕的来源（文件路径 / 内嵌BMP字节数 / 读取失败）。
+    /// </summary>
+    public static string LastReadInfo { get; private set; } = "尚未读取";
 
     /// <summary>读取全部显示器的壁纸信息（按屏幕顺序）</summary>
     public static IReadOnlyList<WallpaperImageInfo> ReadAllMonitors(int monitorCount)
     {
         var result = new List<WallpaperImageInfo>(Math.Max(1, monitorCount));
+        var diag = new List<string>(Math.Max(1, monitorCount));
 
         // 主屏
-        result.Add(ReadCacheValue("TranscodedImageCache") ?? ReadStaticWallpaper());
+        var main = ReadCacheValue("TranscodedImageCache") ?? ReadStaticWallpaper();
+        diag.Add(Describe(main, "主屏"));
+        if (main != null) result.Add(main);
 
         // 扩展屏：TranscodedImageCache_000、_001、...
         for (int i = 1; i < monitorCount; i++)
         {
             string name = i == 1 ? "TranscodedImageCache_000" : $"TranscodedImageCache_{i - 1:000}";
-            result.Add(ReadCacheValue(name) ?? ReadStaticWallpaper());
+            var info = ReadCacheValue(name) ?? ReadStaticWallpaper();
+            diag.Add(Describe(info, $"屏{i + 1}"));
+            if (info != null) result.Add(info);
         }
 
+        LastReadInfo = string.Join(" | ", diag);
         return result;
+    }
+
+    private static string Describe(WallpaperImageInfo? info, string label)
+    {
+        if (info == null) return $"{label}=读取失败";
+        if (!string.IsNullOrEmpty(info.Path)) return $"{label}=文件:{Path.GetFileName(info.Path)}";
+        if (info.EmbeddedBmp != null) return $"{label}=内嵌BMP:{info.EmbeddedBmp.Length}字节";
+        return $"{label}=空";
     }
 
     /// <summary>读取指定 TranscodedImageCache 值并解析出路径/内嵌BMP</summary>
@@ -104,20 +126,22 @@ public static class WallpaperSource
                 path = m.Value;
         }
 
-        // 路径字符串终止后是内嵌 BMP（"BM" 魔数 0x42 0x4D，按 2 字节对齐扫描）
+        // 内嵌 BMP（"BM" 魔数）。格式在不同 Windows 版本略有差异，
+        // 因此从 offset 0 起按 2 字节对齐扫描，并要求：
+        //   'B''M' + 文件大小字段（第 2-5 字节，小端）≈ 剩余长度，
+        //   且长度 ≥ 54（合法 BMP 头）—— 避免误中路径里的巧合字节。
         byte[]? bmp = null;
-        for (int i = 8; i < data.Length - 1; i += 2)
+        for (int i = 0; i < data.Length - 54; i += 2)
         {
-            if (data[i] == 0x42 && data[i + 1] == 0x4D)
-            {
-                int len = data.Length - i;
-                if (len >= 54) // 至少是合法 BMP 头
-                {
-                    bmp = new byte[len];
-                    Array.Copy(data, i, bmp, 0, len);
-                }
-                break;
-            }
+            if (data[i] != 0x42 || data[i + 1] != 0x4D) continue;
+            int declared = data[i + 2] | (data[i + 3] << 8) |
+                           (data[i + 4] << 16) | (data[i + 5] << 24);
+            int remaining = data.Length - i;
+            if (declared <= 0 || Math.Abs(declared - remaining) > 32) continue; // 长度对不上 → 伪 BM
+
+            bmp = new byte[remaining];
+            Array.Copy(data, i, bmp, 0, remaining);
+            break;
         }
 
         return (path, bmp);

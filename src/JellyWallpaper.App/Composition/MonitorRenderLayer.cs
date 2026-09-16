@@ -240,8 +240,15 @@ public sealed class MonitorRenderLayer : IDisposable
         catch (Exception ex)
         {
             // 单帧失败（GPU 资源丢失/尺寸异常）：跳过本帧，不崩溃，
-            // 但记录原因（状态栏显示，避免"静默无效果"）
-            LastRenderError = $"{ex.GetType().Name}: {ex.Message}";
+            // 但记录原因（状态栏显示，避免"静默无效果"）。
+            // 附 HRESULT：COMException/SharpDXException 的错误码直接可见。
+            string hr = ex switch
+            {
+                System.Runtime.InteropServices.COMException com => $" 0x{com.HResult:X8}",
+                SharpDX.SharpDXException sd => $" 0x{(uint)sd.ResultCode:X8}",
+                _ => ""
+            };
+            LastRenderError = $"{ex.GetType().Name}: {ex.Message}{hr}";
         }
     }
 

@@ -12,31 +12,31 @@ namespace JellyWallpaper.App.Composition;
 /// <summary>
 /// DWM 桌面合成宿主（模块④的核心，也是图层 Z 序的关键）。
 ///
-/// ── 图层 Z 序原理（v5.4：自建窗口挂入桌面壁纸层）──────────────────
+/// ── 图层 Z 序原理（v5.7：自建窗口挂入 Progman 子层）────────────────
 /// Windows 桌面的窗口结构（Win10/11）：
 ///     Progman（Program Manager，桌面根窗口）
 ///       ├─ SHELLDLL_DefView → SysListView32（桌面图标层）
-///       └─ WorkerW（0x052C 消息后创建的壁纸承载层，位于图标之下）
+///       └─ （DWM 绘制的系统壁纸背景，非子窗口）
 ///
 /// 关键约束（实测坐实）：Composition 的 CreateDesktopWindowTarget **只允许
 /// 挂载本进程创建的窗口**；挂 explorer 的 Progman 会返回 0x80070005
 /// （E_ACCESSDENIED，拒绝访问）。因此正确做法是：
-///   1. SendMessageTimeout(Progman, 0x052C) 让系统创建壁纸承载层 WorkerW；
-///   2. 枚举顶层窗口，找到"不含 SHELLDLL_DefView 子窗口"的 WorkerW
-///      （它正是图标之下的壁纸层）；
-///   3. 本进程自建一个全屏 Win32 窗口（WS_EX_NOACTIVATE|WS_EX_TRANSPARENT，
+///   1. 本进程自建一个全屏 Win32 窗口（WS_EX_NOACTIVATE|WS_EX_TRANSPARENT，
 ///      输入走全局轮询，窗口不接收任何点击）；
-///   4. SetParent(自建窗口, WorkerW) + SetWindowPos(HWND_BOTTOM)
-///      → 自建窗口进入图标层之下、系统壁纸之上；
-///   5. CreateDesktopWindowTarget(自建窗口, false) → CompositionTarget
+///   2. SetParent(自建窗口, Progman) + SetWindowPos(HWND_BOTTOM)
+///      → 自建窗口位于 Progman 子窗口 Z 序底部：
+///        系统壁纸背景（DWM 绘制，在子窗口之下）→ 本层 → 图标层；
+///   3. CreateDesktopWindowTarget(自建窗口, false) → CompositionTarget
 ///      （挂自己的窗口，权限通过；isTopmost=false 因为它是子窗口）。
+///   相比 SetParent 到 WorkerW（v5.4~v5.6），直接挂 Progman 不依赖
+///   0x052C 机制与 WorkerW 可见性，Win10 全版本行为一致。
 ///
 /// 最终 Z 序严格为：系统壁纸 → 本程序 Direct2D 渲染层 → 桌面图标。
 /// 且：不使用置顶透明窗口、不注入 explorer、不 Hook WorkerW、
 /// 不装任何全局钩子（输入用 GetAsyncKeyState 轮询，见 MouseInputService）；
 /// 图标层永远是独立 HWND，位于合成内容之上，移动/增删完全不受干扰。
 ///
-/// ── 版本演进（为什么是 v5.4）──────────────────────────────────────
+/// ── 版本演进（为什么是 v5.7）──────────────────────────────────────
 /// v1 WinAppSDK ContentIsland：Win10 19041 原生崩溃；
 /// v2 WinAppSDK ICompositorDesktopInterop：C# 投影无 CompositionTarget；
 /// v3 系统版 Composition + Win2D：Win2D 无系统版桌面资产；
@@ -44,7 +44,10 @@ namespace JellyWallpaper.App.Composition;
 /// v4.5 系统版挂载 Progman：GUID 拼错 → QI 0x80004002；
 /// v5.3 修正 GUID 后：CreateDesktopWindowTarget 挂 Progman 被拒
 ///      （0x80070005）→ 坐实"只能挂自己的窗口"；
-/// v5.4 自建壁纸窗口挂入 WorkerW，再挂载自己的窗口（本版本）。
+/// v5.4 自建壁纸窗口挂入 WorkerW 再挂载 → 挂载成功（不再报错）；
+/// v5.6 诊断：渲染/输入/物理全通，但部分 Win10 上 WorkerW 被原生
+///      壁纸盖住 → "窗口可见但用户看不见"；
+/// v5.7 改挂 Progman 子层（HWND_BOTTOM），全版本一致可见（本版本）。
 ///
 /// ── 线程模型 ─────────────────────────────────────────────────────
 /// 所有 Composition 对象必须在"带 DispatcherQueue 的合成线程"上创建
@@ -93,11 +96,11 @@ public sealed class DesktopWallpaperHost
 
         try
         {
-            // ① 找到桌面壁纸层父窗口（WorkerW；explorer 未就绪则重试）
-            _layerHwnd = FindWallpaperLayer();
+            // ① 找到桌面根窗口 Progman（explorer 未就绪则重试）
+            _layerHwnd = FindDesktopRoot();
             if (_layerHwnd == IntPtr.Zero)
             {
-                LastError = "找不到壁纸层窗口（explorer 未启动或桌面未就绪，持续重试中）";
+                LastError = "找不到 Progman 窗口（explorer 未启动或桌面未就绪，持续重试中）";
                 return false;
             }
 
@@ -217,44 +220,19 @@ public sealed class DesktopWallpaperHost
         }
     }
 
-    // ── 壁纸层窗口查找（经典 WorkerW 机制）────────────────────────────
+    // ── 桌面根窗口查找 ────────────────────────────────────────────────
     /// <summary>
-    /// 让 Progman 创建壁纸承载层 WorkerW 并找到它。
-    /// 0x052C 消息：Progman 收到后把图标（SHELLDLL_DefView）移入新的 WorkerW，
-    /// 同时保留/创建另一个 WorkerW 作为壁纸层（在图标之下）。
-    /// 枚举所有 "WorkerW" 顶层窗口，取"不含 SHELLDLL_DefView 子窗口"的那个
-    /// —— 它就是壁纸层。找不到时兜底返回 Progman 本身。
+    /// 找到 Progman（桌面根窗口）。本程序把自己的全屏窗口 SetParent 到
+    /// Progman 并置于子窗口 Z 序底部，从而处于"系统壁纸之上、图标之下"：
+    ///   * Progman 的壁纸背景由 DWM 绘制（不是子窗口），子窗口必然在其上；
+    ///   * SHELLDLL_DefView（图标）是 Progman 子窗口，我们排在它下面；
+    ///   * 0x052C 后图标移入独立 WorkerW 时，Progman 只剩壁纸，同样可见。
+    /// 相比"SetParent 到 WorkerW"，直接挂 Progman 在 Win10 全版本行为一致，
+    /// 不依赖 0x052C 是否生效、不依赖 WorkerW 是否可见（v5.6 实测：部分
+    /// 版本找到的 WorkerW 会被原生壁纸盖住，导致"窗口可见但看不见"）。
     /// </summary>
-    private static IntPtr FindWallpaperLayer()
-    {
-        IntPtr progman = NativeMethods.FindWindow("Progman", null);
-        if (progman == IntPtr.Zero) return IntPtr.Zero;
-
-        // 触发 WorkerW 创建（对无窗口场景无害）
-        NativeMethods.SendMessageTimeout(progman, NativeMethods.WM_SPAWN_WORKERW,
-                                         IntPtr.Zero, IntPtr.Zero,
-                                         NativeMethods.SMTO_NORMAL, 1000, out _);
-
-        IntPtr workerW = IntPtr.Zero;
-        NativeMethods.EnumWindows((hwnd, _) =>
-        {
-            var sb = new StringBuilder(256);
-            NativeMethods.GetClassName(hwnd, sb, sb.Capacity);
-            if (sb.ToString() != "WorkerW") return true;
-
-            // 含 SHELLDLL_DefView 子窗口的 WorkerW = 图标层（跳过）；
-            // 不含的 = 壁纸承载层（目标）
-            IntPtr icons = NativeMethods.FindWindowEx(hwnd, IntPtr.Zero, "SHELLDLL_DefView", null);
-            if (icons == IntPtr.Zero)
-            {
-                workerW = hwnd;
-                return false;
-            }
-            return true;
-        }, IntPtr.Zero);
-
-        return workerW != IntPtr.Zero ? workerW : progman; // 兜底：直接挂 Progman
-    }
+    private static IntPtr FindDesktopRoot()
+        => NativeMethods.FindWindow("Progman", null);
 
     // ── 自建壁纸窗口 ──────────────────────────────────────────────────
     /// <summary>
