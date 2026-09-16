@@ -126,6 +126,15 @@ public sealed class MonitorRenderLayer : IDisposable
     /// <summary>表面 COM 指针（CreateVisual 时 AddRef 缓存，Dispose 时 Release）</summary>
     private IntPtr _surfaceComPtr;
 
+    /// <summary>路径②（Dev iid）时 BeginDraw 返回的设备指针，EndDraw 后释放</summary>
+    private IntPtr _devPtrToRelease;
+
+    /// <summary>本帧实际生效的绘制路径（①DC / ②Dev / ③RECT，状态栏诊断）</summary>
+    private string _renderPath = "";
+
+    /// <summary>实际生效的绘制路径（状态栏显示）</summary>
+    public string RenderPath => _renderPath;
+
     /// <summary>
     /// 在合成线程创建绘制表面 + 画笔视觉并启动渲染定时器。
     /// </summary>
@@ -256,45 +265,63 @@ public sealed class MonitorRenderLayer : IDisposable
             _fpsWindowTicks = _tickCount;
         }
 
-        // ① BeginDraw：请求 ID2D1DeviceContext（整个表面更新）。
-        //    v5.11 主路径 = 手写 vtable 调用（零 .NET 封送，100% 原始 HRESULT）。
-        //    ComImport RCW 调用曾返回 0x80131509（.NET 异常码），无法区分
-        //    "原生拒绝"与"封送异常"；手写调用一锤定音。失败时再对比
-        //    ComImport 的码，并在状态栏同时显示两者。
+        // ① BeginDraw：手写 vtable 调用（零封送），v5.12 三路径自愈：
+        //    路径① updateRect=NULL + ID2D1DeviceContext iid（文档标准）
+        //    路径② updateRect=NULL + ID2D1Device iid（部分系统版只认设备）
+        //           → 手写 CreateDeviceContext 得到绘制上下文
+        //    路径③ updateRect=整个表面 RECT + ID2D1DeviceContext iid
         IntPtr ctxPtr = IntPtr.Zero;
         IntPtr comPtr = _surfaceComPtr;
         var iidDc = CompositionInterop.IID_ID2D1DeviceContext;
+        string path;
 
-        int hrRaw = CompositionInterop.RawBeginDraw(comPtr, IntPtr.Zero, iidDc, out ctxPtr, out _);
-        if (hrRaw >= 0)
+        int hr1 = CompositionInterop.RawBeginDraw(comPtr, IntPtr.Zero, iidDc, out ctxPtr, out _);
+        if (hr1 >= 0 && ctxPtr != IntPtr.Zero)
         {
-            // 手写路径成功 → 用手写 EndDraw 提交（保持一致，不混用两条路）
-            _useRawSurfaceCalls = true;
+            path = "①DC";
         }
         else
         {
-            // 手写失败 → 对比 ComImport 结果，并试显式 RECT
-            int hrImp = BeginDrawRaw(IntPtr.Zero, iidDc, out _);
-            var rect = new RECTSTRUCT { Left = 0, Top = 0, Right = Bounds.Width, Bottom = Bounds.Height };
-            var rGch = System.Runtime.InteropServices.GCHandle.Alloc(rect, System.Runtime.InteropServices.GCHandleType.Pinned);
-            int hrRawRect;
-            try
+            // 路径②：设备 iid → 设备上下文
+            IntPtr devPtr = IntPtr.Zero;
+            int hr2 = CompositionInterop.RawBeginDraw(comPtr, IntPtr.Zero,
+                new Guid("47DD575D-AC05-4CDD-8049-9B02D16F5C6E"), out devPtr, out _);
+            if (hr2 >= 0 && devPtr != IntPtr.Zero)
             {
-                hrRawRect = CompositionInterop.RawBeginDraw(comPtr, rGch.AddrOfPinnedObject(), iidDc, out ctxPtr, out _);
+                int hrC = CompositionInterop.RawCreateDeviceContext(devPtr, out ctxPtr);
+                if (hrC < 0 || ctxPtr == IntPtr.Zero)
+                {
+                    Marshal.Release(devPtr);
+                    LastRenderError = $"路径②失败 Dev→Ctx=0x{hrC:X8}";
+                    return;
+                }
+                _devPtrToRelease = devPtr; // EndDraw 后释放（BeginDraw 返回的引用）
+                path = "②Dev";
             }
-            finally
+            else
             {
-                rGch.Free();
+                // 路径③：显式 RECT
+                var rect = new RECTSTRUCT { Left = 0, Top = 0, Right = Bounds.Width, Bottom = Bounds.Height };
+                var rGch = System.Runtime.InteropServices.GCHandle.Alloc(rect, System.Runtime.InteropServices.GCHandleType.Pinned);
+                int hr3;
+                try
+                {
+                    hr3 = CompositionInterop.RawBeginDraw(comPtr, rGch.AddrOfPinnedObject(), iidDc, out ctxPtr, out _);
+                }
+                finally
+                {
+                    rGch.Free();
+                }
+                if (hr3 < 0 || ctxPtr == IntPtr.Zero)
+                {
+                    LastRenderError = $"BeginDraw全失败 ①=0x{hr1:X8} ②=0x{hr2:X8} ③=0x{hr3:X8} d2d=0x{_ownerDevicePtr:X}";
+                    return;
+                }
+                path = "③RECT";
             }
-            if (hrRawRect < 0)
-            {
-                var raw = _surfaceInteropRaw;
-                int hrC = raw?.Resize(Bounds.Width, Bounds.Height) ?? unchecked((int)0x80004003);
-                LastRenderError = $"BeginDraw失败 手写NULL=0x{hrRaw:X8} 手写RECT=0x{hrRawRect:X8} COM=0x{hrImp:X8} Resize=0x{hrC:X8} d2d=0x{_ownerDevicePtr:X}";
-                return;
-            }
-            _useRawSurfaceCalls = true; // RECT 手写成功 → 也用原生态 EndDraw
         }
+        _renderPath = path;
+        _useRawSurfaceCalls = true;
         if (ctxPtr == IntPtr.Zero)
         {
             LastRenderError = "BeginDraw 返回空指针（GPU 设备丢失）";
@@ -327,6 +354,12 @@ public sealed class MonitorRenderLayer : IDisposable
             {
                 LastRenderError = $"EndDraw 失败 HRESULT=0x{hrEnd:X8}";
                 return;
+            }
+            // 路径②（Dev iid）时：EndDraw 后释放 BeginDraw 返回的设备引用
+            if (_devPtrToRelease != IntPtr.Zero)
+            {
+                Marshal.Release(_devPtrToRelease);
+                _devPtrToRelease = IntPtr.Zero;
             }
         }
         catch (Exception ex)

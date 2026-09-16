@@ -73,6 +73,9 @@ public static class CompositionInterop
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int FnEndDraw(IntPtr self);
 
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int FnCreateDeviceContext(IntPtr self, uint options, out IntPtr deviceContext);
+
     /// <summary>从任意 COM 接口指针手写调用 BeginDraw（槽位 3），返回原生 HRESULT</summary>
     public static int RawBeginDraw(IntPtr surfaceComPtr, IntPtr updateRect, Guid iid,
                                    out IntPtr updateObject, out POINTSTRUCT updateOffset)
@@ -100,6 +103,20 @@ public static class CompositionInterop
         IntPtr fn = Marshal.ReadIntPtr(Marshal.ReadIntPtr(surfaceComPtr), 4 * IntPtr.Size);
         var del = Marshal.GetDelegateForFunctionPointer<FnEndDraw>(fn);
         return del(surfaceComPtr);
+    }
+
+    /// <summary>
+    /// 从 ID2D1Device 指针手写调用 CreateDeviceContext（vtable 槽位 4，
+    /// ID2D1Device 继承 ID2D1Resource：[0..2]=IUnknown [3]=GetFactory [4]=CreateDeviceContext）。
+    /// options = D2D1_DEVICE_CONTEXT_OPTIONS_NONE(0)。
+    /// </summary>
+    public static int RawCreateDeviceContext(IntPtr devicePtr, out IntPtr deviceContextPtr)
+    {
+        deviceContextPtr = IntPtr.Zero;
+        if (devicePtr == IntPtr.Zero) return unchecked((int)0x80004003);
+        IntPtr fn = Marshal.ReadIntPtr(Marshal.ReadIntPtr(devicePtr), 4 * IntPtr.Size);
+        var del = Marshal.GetDelegateForFunctionPointer<FnCreateDeviceContext>(fn);
+        return del(devicePtr, 0, out deviceContextPtr);
     }
 }
 
