@@ -110,7 +110,7 @@ public sealed class DesktopWallpaperHost
             {
                 desktopInterop = CompositionInterop.GetInterop<ICompositorDesktopInterop>(
                     _compositor, CompositionInterop.ICompositorDesktopInteropIid);
-                desktopInterop.CreateDesktopWindowTarget(_progmanHwnd, false, out targetPtr);
+                desktopInterop.CreateDesktopWindowTarget(_progmanHwnd, true, out targetPtr);
             }
             catch (Exception ex)
             {

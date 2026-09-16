@@ -27,7 +27,7 @@ namespace JellyWallpaper.App.Native;
 public static class CompositionInterop
 {
     // ── 接口 IID（与头文件一致）─────────────────────────────────────
-    public static readonly Guid ICompositorDesktopInteropIid = new("29E691FA-4567-4DCA-B319-DB0B3C6274D4");
+    public static readonly Guid ICompositorDesktopInteropIid = new("29E691FA-4567-4DCA-B319-D0F207EB6807");
     public static readonly Guid ICompositorInteropIid = new("25297D5C-3AD4-4C9C-B5CF-E36A38512330");
     public static readonly Guid ICompositionDrawingSurfaceInteropIid = new("FD04E6E3-FE0C-4C3C-AB19-A07601A576EE");
 
@@ -62,14 +62,14 @@ public static class CompositionInterop
 
 /// <summary>
 /// Compositor 桌面互操作接口（系统版 Windows.UI.Composition）。
-/// MIDL_INTERFACE("29E691FA-4567-4DCA-B319-DB0B3C6274D4")
+/// MIDL_INTERFACE("29E691FA-4567-4DCA-B319-D0F207EB6807")
 ///   CreateDesktopWindowTarget(HWND, BOOL isTopmost, IDesktopWindowTarget** result);
 ///   EnsureOnThread(DWORD threadId);
 /// CsWinRT 生成的 Compositor 对象实现 ICustomQueryInterface，
 /// 可以直接 cast 到该 ComImport 接口（动态壁纸 C# 项目标准做法）。
 /// </summary>
 [ComImport]
-[Guid("29E691FA-4567-4DCA-B319-DB0B3C6274D4")]
+[Guid("29E691FA-4567-4DCA-B319-D0F207EB6807")]
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 public interface ICompositorDesktopInterop
 {
