@@ -146,3 +146,36 @@ public interface ICompositionDrawingSurfaceInterop
     void ResumeDraw();
     void SuspendDraw();
 }
+
+/// <summary>
+/// 绘制表面互操作接口的"裸调用"版本（[PreserveSig] + 原始 HRESULT）。
+///
+/// 用途：BeginDraw 失败时精确显示 HRESULT，并支持直接传 pinned Guid 指针
+/// 排除 .NET ref Guid 封送的一切干扰。vtable 与系统版头文件一致。
+/// </summary>
+[ComImport]
+[Guid("FD04E6E3-FE0C-4C3C-AB19-A07601A576EE")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface ICompositionDrawingSurfaceInteropRaw
+{
+    /// <summary>返回 S_OK(0) 或负 HRESULT（E_INVALIDARG=0x80070057、DXGI_ERROR_DEVICE_REMOVED=0x887A0005 等）</summary>
+    [PreserveSig] int BeginDraw(IntPtr updateRect, IntPtr iidPtr, out IntPtr updateObject, out POINTSTRUCT updateOffset);
+
+    [PreserveSig] int EndDraw();
+
+    [PreserveSig] int Resize(int width, int height);
+
+    [PreserveSig] int Scroll(IntPtr scrollRect, IntPtr clipRect, int offsetX, int offsetY);
+
+    [PreserveSig] int ResumeDraw();
+
+    [PreserveSig] int SuspendDraw();
+}
+
+/// <summary>与 Win32 POINT 布局一致的结构（裸调用 out 参数用）</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct POINTSTRUCT
+{
+    public int X;
+    public int Y;
+}

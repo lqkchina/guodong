@@ -63,6 +63,7 @@ public sealed class MonitorRenderLayer : IDisposable
     // 合成对象（合成线程创建/使用）
     private CompositionDrawingSurface? _surface;
     private ICompositionDrawingSurfaceInterop? _surfaceInterop; // COM 视图
+    private ICompositionDrawingSurfaceInteropRaw? _surfaceInteropRaw; // 裸 HRESULT 视图
     private CompositionSurfaceBrush? _brush;
     private SpriteVisual? _visual;
     private DispatcherQueueTimer? _timer;
@@ -133,6 +134,11 @@ public sealed class MonitorRenderLayer : IDisposable
         // ② 表面的 COM 视图（BeginDraw/EndDraw）
         //    （走 QueryInterface + RCW，不依赖 CsWinRT 内部 cast 行为）
         _surfaceInterop = CompositionInterop.GetInterop<ICompositionDrawingSurfaceInterop>(
+            _surface, CompositionInterop.ICompositionDrawingSurfaceInteropIid);
+
+        // ②′ 同一接口的"裸调用"视图（[PreserveSig] 拿原始 HRESULT，
+        //    BeginDraw 用 pinned Guid 指针，排除 .NET 封送干扰）
+        _surfaceInteropRaw = CompositionInterop.GetInterop<ICompositionDrawingSurfaceInteropRaw>(
             _surface, CompositionInterop.ICompositionDrawingSurfaceInteropIid);
 
         // ③ 表面画笔 + 精灵视觉：Stretch=None（1:1 像素），
@@ -236,19 +242,15 @@ public sealed class MonitorRenderLayer : IDisposable
             _fpsWindowTicks = _tickCount;
         }
 
-        // ① BeginDraw：请求 ID2D1DeviceContext（整个表面更新）
-        //    （static readonly IID 不能直接 ref，先拷贝到局部变量）
+        // ① BeginDraw：请求 ID2D1DeviceContext（整个表面更新）。
+        //    裸调用（[PreserveSig] + pinned Guid 指针），失败时拿到原始 HRESULT。
+        //    若失败，再探测 ID2D1Device iid —— 用于确认"系统版是否只认设备 iid"。
         IntPtr ctxPtr;
-        try
+        int hr = BeginDrawRaw(CompositionInterop.IID_ID2D1DeviceContext, out ctxPtr);
+        if (hr < 0)
         {
-            var iid = CompositionInterop.IID_ID2D1DeviceContext;
-            interop.BeginDraw(IntPtr.Zero, ref iid, out ctxPtr, out _);
-        }
-        catch (Exception ex)
-        {
-            // BeginDraw 失败 → 表面内容不更新。记录精确原因 + 堆栈方法名，
-            // 便于定位（如 iid 不受支持 / surface 尺寸异常 / 设备丢失）。
-            LastRenderError = "BeginDraw失败 " + DescribeException(ex);
+            int hrDev = BeginDrawRaw(new Guid("47DD575D-AC05-4CDD-8049-9B02D16F5C6E"), out _);
+            LastRenderError = $"BeginDraw失败 DC-iid=0x{hr:X8} Dev-iid=0x{hrDev:X8}";
             return;
         }
         if (ctxPtr == IntPtr.Zero)
@@ -276,7 +278,13 @@ public sealed class MonitorRenderLayer : IDisposable
         try
         {
             // ③ 提交到合成表面（EndDraw 后 BeginDraw 返回的 ctx 指针失效）
-            interop.EndDraw();
+            var raw = _surfaceInteropRaw;
+            int hrEnd = raw?.EndDraw() ?? 0;
+            if (hrEnd < 0)
+            {
+                LastRenderError = $"EndDraw 失败 HRESULT=0x{hrEnd:X8}";
+                return;
+            }
         }
         catch (Exception ex)
         {
@@ -285,6 +293,23 @@ public sealed class MonitorRenderLayer : IDisposable
         }
 
         LastRenderError = null; // 本帧成功，清除历史错误提示
+    }
+
+    /// <summary>BeginDraw 裸调用：pinned Guid 指针传 iid，返回原始 HRESULT</summary>
+    private int BeginDrawRaw(Guid iid, out IntPtr ctxPtr)
+    {
+        ctxPtr = IntPtr.Zero;
+        var raw = _surfaceInteropRaw;
+        if (raw == null) return unchecked((int)0x80004003); // E_POINTER
+        var gch = System.Runtime.InteropServices.GCHandle.Alloc(iid, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
+        {
+            return raw.BeginDraw(IntPtr.Zero, gch.AddrOfPinnedObject(), out ctxPtr, out _);
+        }
+        finally
+        {
+            gch.Free();
+        }
     }
 
     /// <summary>把异常转成诊断文本：类型 + 消息 + HRESULT + 第一个堆栈方法名</summary>
