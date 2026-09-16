@@ -77,9 +77,20 @@ public partial class MainWindow : Window
 
     private void UpdateStatus()
     {
-        TxtStatus.Text = _manager.HostReady
-            ? "合成层状态：已挂载到桌面（壁纸 → 果冻层 → 图标）"
-            : "合成层状态：等待 explorer 就绪…";
+        if (_manager.HostReady)
+        {
+            TxtStatus.Text = "合成层状态：已挂载到桌面（壁纸 → 果冻层 → 图标）";
+            TxtStatusDetail.Text = "在桌面空白处按住左键拖拽即可看到果冻效果";
+        }
+        else
+        {
+            TxtStatus.Text = "合成层状态：等待 explorer 就绪…";
+            // 显示具体失败原因（定位问题用）
+            var err = _manager.LastInitError;
+            TxtStatusDetail.Text = string.IsNullOrEmpty(err)
+                ? "正在重试挂载…"
+                : $"原因：{err}";
+        }
     }
 
     // ── 滑条事件：写配置 + 刷新标签（立即生效）────────────────────────

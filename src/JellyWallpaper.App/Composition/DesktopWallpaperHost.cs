@@ -56,6 +56,9 @@ public sealed class DesktopWallpaperHost
     /// <summary>是否已成功挂载到桌面</summary>
     public bool IsInitialized => _initialized;
 
+    /// <summary>最近一次挂载失败的详细原因（UI 状态栏显示，用于快速定位）</summary>
+    public string? LastError { get; private set; }
+
     /// <summary>组合根容器（子视觉按屏幕挂入）</summary>
     public ContainerVisual? Root => _root;
 
@@ -69,80 +72,139 @@ public sealed class DesktopWallpaperHost
     /// 查找 Progman 并创建桌面合成目标与图形设备。必须在合成线程调用。
     /// 返回 false 表示 explorer 尚未就绪或系统不支持（上层会定时重试）。
     /// 失败只降级不崩溃（全部挂载逻辑包在 try-catch 中）。
+    /// 每一步失败都会把详细原因记录到 LastError（UI 状态栏显示）。
     /// </summary>
     /// <param name="d2dDevice">Direct2D 设备（SharpDX.Direct2D1.Device 的原生指针）
     /// —— CompositionGraphicsDevice 的底层渲染设备</param>
     public bool Initialize(IntPtr d2dDevice)
     {
         Teardown();
+        LastError = null;
 
         try
         {
             _progmanHwnd = NativeMethods.FindWindow("Progman", null);
             if (_progmanHwnd == IntPtr.Zero)
-                return false; // explorer 未启动/重启中，稍后重试
+            {
+                LastError = "找不到 Progman 窗口（explorer 未启动或桌面未就绪，持续重试中）";
+                return false;
+            }
 
-            _compositor = new Compositor();
-            _root = _compositor.CreateContainerVisual();
-
-            // ① 桌面挂载：Compositor → ICompositorDesktopInterop
-            //    （系统版 Compositor 实现此接口；走 QueryInterface + RCW，
-            //      不依赖 CsWinRT 类型的内部 cast 行为）
-            IntPtr targetPtr = IntPtr.Zero;
-            var desktopInterop = CompositionInterop.GetInterop<ICompositorDesktopInterop>(
-                _compositor, CompositionInterop.ICompositorDesktopInteropIid);
+            // ① 创建系统合成器（Windows.UI.Composition，Win10 自带）
             try
             {
+                _compositor = new Compositor();
+            }
+            catch (Exception ex)
+            {
+                LastError = $"创建 Compositor 失败：{Describe(ex)}";
+                return false;
+            }
+            _root = _compositor.CreateContainerVisual();
+
+            // ② 桌面挂载：Compositor → ICompositorDesktopInterop
+            //    （系统版 Compositor 实现此接口；走 QueryInterface + RCW）
+            IntPtr targetPtr = IntPtr.Zero;
+            ICompositorDesktopInterop? desktopInterop = null;
+            try
+            {
+                desktopInterop = CompositionInterop.GetInterop<ICompositorDesktopInterop>(
+                    _compositor, CompositionInterop.ICompositorDesktopInteropIid);
                 desktopInterop.CreateDesktopWindowTarget(_progmanHwnd, false, out targetPtr);
+            }
+            catch (Exception ex)
+            {
+                LastError = $"CreateDesktopWindowTarget 失败：{Describe(ex)}";
+                return false;
             }
             finally
             {
-                Marshal.ReleaseComObject(desktopInterop);
+                if (desktopInterop != null) Marshal.ReleaseComObject(desktopInterop);
             }
             if (targetPtr == IntPtr.Zero)
             {
-                Teardown();
+                LastError = "CreateDesktopWindowTarget 返回空指针";
                 return false;
             }
 
-            // 包装为系统版投影对象（Windows.UI.Composition.CompositionTarget
-            // 存在且带 Root 属性），把根视觉挂到桌面窗口。
-            // FromAbi 内部会 AddRef，因此释放我们这一针引用。
-            _target = CompositionTarget.FromAbi(targetPtr);
-            Marshal.Release(targetPtr);
-            _target.Root = _root;
-
-            // ② 图形设备：ICompositorInterop::CreateGraphicsDevice(ID2D1Device)
-            //    → CompositionGraphicsDevice（创建绘制表面的来源）
-            IntPtr gfxPtr = IntPtr.Zero;
-            var compositorInterop = CompositionInterop.GetInterop<ICompositorInterop>(
-                _compositor, CompositionInterop.ICompositorInteropIid);
+            // 包装为系统版投影对象（CompositionTarget 存在且带 Root 属性）
             try
             {
-                compositorInterop.CreateGraphicsDevice(d2dDevice, out gfxPtr);
+                _target = CompositionTarget.FromAbi(targetPtr);
+                _target.Root = _root;
+            }
+            catch (Exception ex)
+            {
+                LastError = $"CompositionTarget.FromAbi 失败：{Describe(ex)}";
+                return false;
             }
             finally
             {
-                Marshal.ReleaseComObject(compositorInterop);
+                Marshal.Release(targetPtr); // FromAbi 已 AddRef，释放我们这一针
+            }
+
+            // ③ 图形设备：ICompositorInterop::CreateGraphicsDevice(ID2D1Device)
+            //    → CompositionGraphicsDevice（创建绘制表面的来源）
+            IntPtr gfxPtr = IntPtr.Zero;
+            ICompositorInterop? compositorInterop = null;
+            try
+            {
+                compositorInterop = CompositionInterop.GetInterop<ICompositorInterop>(
+                    _compositor, CompositionInterop.ICompositorInteropIid);
+                compositorInterop.CreateGraphicsDevice(d2dDevice, out gfxPtr);
+            }
+            catch (Exception ex)
+            {
+                LastError = $"CreateGraphicsDevice 失败：{Describe(ex)}";
+                return false;
+            }
+            finally
+            {
+                if (compositorInterop != null) Marshal.ReleaseComObject(compositorInterop);
             }
             if (gfxPtr == IntPtr.Zero)
             {
-                Teardown();
+                LastError = "CreateGraphicsDevice 返回空指针";
                 return false;
             }
-            _graphicsDevice = CompositionGraphicsDevice.FromAbi(gfxPtr);
-            Marshal.Release(gfxPtr);
+
+            try
+            {
+                _graphicsDevice = CompositionGraphicsDevice.FromAbi(gfxPtr);
+            }
+            catch (Exception ex)
+            {
+                LastError = $"CompositionGraphicsDevice.FromAbi 失败：{Describe(ex)}";
+                return false;
+            }
+            finally
+            {
+                Marshal.Release(gfxPtr);
+            }
 
             _initialized = true;
             return true;
         }
         catch (Exception ex)
         {
-            // 挂载失败：清理后返回 false，由上层重试
-            System.Diagnostics.Debug.WriteLine($"[DesktopWallpaperHost] 挂载失败: {ex}");
-            Teardown();
+            // 未预期的兜底：记录后返回 false，由上层重试
+            LastError = $"未预期异常：{Describe(ex)}";
             return false;
         }
+        finally
+        {
+            if (!_initialized)
+                Teardown(); // 失败路径清理半成品资源
+        }
+    }
+
+    /// <summary>把异常转成可读描述（含 HRESULT，便于定位）</summary>
+    private static string Describe(Exception ex)
+    {
+        string msg = ex.Message;
+        if (ex is COMException com)
+            msg += $" (HRESULT 0x{com.HResult:X8})";
+        return $"{ex.GetType().Name}: {msg}";
     }
 
     /// <summary>销毁旧 DWM 资源（explorer 重启后调用，随后重新 Initialize）</summary>

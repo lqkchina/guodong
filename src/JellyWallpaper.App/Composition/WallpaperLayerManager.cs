@@ -50,6 +50,7 @@ public sealed class WallpaperLayerManager : IDisposable
     private readonly SimulationLoop _simulation;
     private readonly WallpaperWatcher _wallpaperWatcher;
     private readonly ExplorerWatcher _explorerWatcher;
+    private string? _lastLoggedError; // 去重：错误文本不变时只写一次日志
 
     /// <summary>当前所有屏幕的渲染层（物理线程每帧读取；重建时整体替换引用）</summary>
     private volatile IReadOnlyList<MonitorRenderLayer> _layers = Array.Empty<MonitorRenderLayer>();
@@ -63,6 +64,9 @@ public sealed class WallpaperLayerManager : IDisposable
 
     /// <summary>桌面合成是否已就绪（供 UI 显示状态）</summary>
     public bool HostReady => _host.IsInitialized;
+
+    /// <summary>最近一次挂载失败的详细原因（UI 状态栏显示，用于快速定位）</summary>
+    public string? LastInitError => _host.LastError;
 
     public WallpaperLayerManager(AppConfig config)
     {
@@ -129,7 +133,15 @@ public sealed class WallpaperLayerManager : IDisposable
         }
         else
         {
-            // explorer 尚未就绪：1 秒后重试（开机启动/explorer 重启初期）
+            // 挂载失败：把详细原因写日志（错误文本不变时不重复写），
+            // 并每 1 秒重试（开机启动/explorer 重启初期 explorer 未就绪）
+            var err = _host.LastError;
+            if (!string.IsNullOrEmpty(err) && err != _lastLoggedError)
+            {
+                _lastLoggedError = err;
+                App.LogError("CompositorMount", new Exception(err));
+            }
+
             var retry = _queue.CreateTimer();
             retry.Interval = TimeSpan.FromSeconds(1);
             retry.IsRepeating = false;

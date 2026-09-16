@@ -36,7 +36,7 @@ public partial class App : System.Windows.Application
             "JellyWallpaper", "error.log");
 
     /// <summary>追加一行错误日志（带时间戳；写失败静默，绝不因日志再抛异常）</summary>
-    private static void LogError(string source, Exception? ex)
+    public static void LogError(string source, Exception? ex)
     {
         try
         {
