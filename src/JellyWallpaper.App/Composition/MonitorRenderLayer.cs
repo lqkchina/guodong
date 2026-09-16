@@ -92,7 +92,17 @@ public sealed class MonitorRenderLayer : IDisposable
     public string? LastRenderError { get; private set; }
 
     /// <summary>壁纸纹理状态（位图尺寸或"未加载"；未加载时显示纯色背景）</summary>
-    public string TextureInfo { get; private set; } = "未加载";
+    public string TextureInfo
+    {
+        get
+        {
+            if (DecodeError != null) return $"解码失败:{DecodeError}";
+            return _wallpaperBmp == null ? "未加载" : $"{_wallpaperW:F0}x{_wallpaperH:F0}";
+        }
+    }
+
+    /// <summary>最近一次壁纸解码失败原因（后台线程写，诊断用）</summary>
+    public volatile string? DecodeError;
 
     public MonitorRenderLayer(DesktopWallpaperHost host, AppConfig config,
                               DispatcherQueue queue, Rectangle bounds, float dpi)
@@ -183,12 +193,21 @@ public sealed class MonitorRenderLayer : IDisposable
                 pixels = new byte[w * h * 4];
                 conv.CopyPixels(pixels, w * 4);
             }
-            catch
+            catch (Exception ex)
             {
-                // 图片读取失败：保留上一张正常纹理，不崩溃（模块①容错）
+                // 图片读取失败：保留上一张正常纹理，不崩溃（模块①容错），
+                // 但记录原因到诊断（状态栏显示"纹理=解码失败:xxx"）
+                string hr = ex switch
+                {
+                    System.Runtime.InteropServices.COMException com => $" 0x{com.HResult:X8}",
+                    SharpDX.SharpDXException sd => $" 0x{(uint)sd.ResultCode:X8}",
+                    _ => ""
+                };
+                DecodeError = $"解码失败 {ex.GetType().Name}:{ex.Message}{hr}";
                 return;
             }
 
+            DecodeError = null; // 解码成功
             // 完成 → 回合成线程：只更新"待消费像素"，不直接触碰渲染资源
             _queue.TryEnqueue(() =>
             {
@@ -217,39 +236,75 @@ public sealed class MonitorRenderLayer : IDisposable
             _fpsWindowTicks = _tickCount;
         }
 
+        // ① BeginDraw：请求 ID2D1DeviceContext（整个表面更新）
+        //    （static readonly IID 不能直接 ref，先拷贝到局部变量）
+        IntPtr ctxPtr;
         try
         {
-            // ① BeginDraw：请求 ID2D1DeviceContext（整个表面更新）
-            //    （static readonly IID 不能直接 ref，先拷贝到局部变量）
             var iid = CompositionInterop.IID_ID2D1DeviceContext;
-            interop.BeginDraw(IntPtr.Zero, ref iid,
-                              out IntPtr ctxPtr, out _);
-            if (ctxPtr == IntPtr.Zero) return; // 设备丢失等：跳过本帧
+            interop.BeginDraw(IntPtr.Zero, ref iid, out ctxPtr, out _);
+        }
+        catch (Exception ex)
+        {
+            // BeginDraw 失败 → 表面内容不更新。记录精确原因 + 堆栈方法名，
+            // 便于定位（如 iid 不受支持 / surface 尺寸异常 / 设备丢失）。
+            LastRenderError = "BeginDraw失败 " + DescribeException(ex);
+            return;
+        }
+        if (ctxPtr == IntPtr.Zero)
+        {
+            LastRenderError = "BeginDraw 返回空指针（GPU 设备丢失）";
+            return;
+        }
 
+        try
+        {
             using (var ctx = new D2DContext(ctxPtr))
             {
                 // ② 绘制（内部会先消费后台解码好的像素 → 建位图）
                 var grid = Grid;
                 DrawWallpaper(ctx, grid);
             }
-
-            // ③ 提交到合成表面（EndDraw 后 BeginDraw 返回的 ctx 指针失效）
-            interop.EndDraw();
-            LastRenderError = null; // 本帧成功，清除历史错误提示
         }
         catch (Exception ex)
         {
-            // 单帧失败（GPU 资源丢失/尺寸异常）：跳过本帧，不崩溃，
-            // 但记录原因（状态栏显示，避免"静默无效果"）。
-            // 附 HRESULT：COMException/SharpDXException 的错误码直接可见。
-            string hr = ex switch
-            {
-                System.Runtime.InteropServices.COMException com => $" 0x{com.HResult:X8}",
-                SharpDX.SharpDXException sd => $" 0x{(uint)sd.ResultCode:X8}",
-                _ => ""
-            };
-            LastRenderError = $"{ex.GetType().Name}: {ex.Message}{hr}";
+            // 绘制阶段失败（纹理/位图/尺寸问题）—— 单帧跳过，不崩溃
+            LastRenderError = "绘制失败 " + DescribeException(ex);
+            return;
         }
+
+        try
+        {
+            // ③ 提交到合成表面（EndDraw 后 BeginDraw 返回的 ctx 指针失效）
+            interop.EndDraw();
+        }
+        catch (Exception ex)
+        {
+            LastRenderError = "EndDraw失败 " + DescribeException(ex);
+            return;
+        }
+
+        LastRenderError = null; // 本帧成功，清除历史错误提示
+    }
+
+    /// <summary>把异常转成诊断文本：类型 + 消息 + HRESULT + 第一个堆栈方法名</summary>
+    private static string DescribeException(Exception ex)
+    {
+        string hr = ex switch
+        {
+            System.Runtime.InteropServices.COMException com => $" 0x{com.HResult:X8}",
+            SharpDX.SharpDXException sd => $" 0x{(uint)sd.ResultCode:X8}",
+            _ => ""
+        };
+        // 取堆栈里第一个"我们的渲染代码"帧的方法名（异常真正抛出的位置）
+        string method = "";
+        var sf = ex.StackTrace?.Split('\n').FirstOrDefault(l => l.Contains("JellyWallpaper") || l.Contains("DrawWallpaper") || l.Contains("BuildBitmap") || l.Contains("D2D"));
+        if (sf != null)
+        {
+            method = sf.Trim().TrimEnd('\r');
+            if (method.Length > 120) method = method[..120];
+        }
+        return $"{ex.GetType().Name}: {ex.Message}{hr} @{method}";
     }
 
     /// <summary>
@@ -364,7 +419,6 @@ public sealed class MonitorRenderLayer : IDisposable
             _wallpaperW = w;
             _wallpaperH = h;
             _source = info;
-            TextureInfo = $"{w}x{h}";
         }
         finally
         {
