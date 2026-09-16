@@ -58,6 +58,49 @@ public static class CompositionInterop
             Marshal.Release(p); // RCW 已持有自己的引用
         }
     }
+
+    // ── 手写 vtable 调用（v5.11 核心）─────────────────────────────────
+    // ComImport RCW 调用在部分环境会额外抛 .NET 异常（如 0x80131509，
+    // InvalidOperationException 被 [PreserveSig] 转为 HRESULT 返回），
+    // 无法确认"原生到底返回什么"。这里直接从 IUnknown vtable 槽位取
+    // 函数指针调用 —— 零封送、零代理，返回 100% 原始 HRESULT。
+    // ICompositionDrawingSurfaceInterop vtable 槽位（IUnknown 后）：
+    //   [3]=BeginDraw  [4]=EndDraw  [5]=Resize  [6]=Scroll
+    //   [7]=ResumeDraw [8]=SuspendDraw
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int FnBeginDraw(IntPtr self, IntPtr updateRect, IntPtr iid, out IntPtr updateObject, out POINTSTRUCT updateOffset);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int FnEndDraw(IntPtr self);
+
+    /// <summary>从任意 COM 接口指针手写调用 BeginDraw（槽位 3），返回原生 HRESULT</summary>
+    public static int RawBeginDraw(IntPtr surfaceComPtr, IntPtr updateRect, Guid iid,
+                                   out IntPtr updateObject, out POINTSTRUCT updateOffset)
+    {
+        updateObject = IntPtr.Zero;
+        updateOffset = default;
+        if (surfaceComPtr == IntPtr.Zero) return unchecked((int)0x80004003); // E_POINTER
+        IntPtr fn = Marshal.ReadIntPtr(Marshal.ReadIntPtr(surfaceComPtr), 3 * IntPtr.Size);
+        var del = Marshal.GetDelegateForFunctionPointer<FnBeginDraw>(fn);
+        var gch = System.Runtime.InteropServices.GCHandle.Alloc(iid, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
+        {
+            return del(surfaceComPtr, updateRect, gch.AddrOfPinnedObject(), out updateObject, out updateOffset);
+        }
+        finally
+        {
+            gch.Free();
+        }
+    }
+
+    /// <summary>从任意 COM 接口指针手写调用 EndDraw（槽位 4），返回原生 HRESULT</summary>
+    public static int RawEndDraw(IntPtr surfaceComPtr)
+    {
+        if (surfaceComPtr == IntPtr.Zero) return unchecked((int)0x80004003);
+        IntPtr fn = Marshal.ReadIntPtr(Marshal.ReadIntPtr(surfaceComPtr), 4 * IntPtr.Size);
+        var del = Marshal.GetDelegateForFunctionPointer<FnEndDraw>(fn);
+        return del(surfaceComPtr);
+    }
 }
 
 /// <summary>

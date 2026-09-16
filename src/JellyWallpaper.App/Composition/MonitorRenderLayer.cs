@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using JellyWallpaper.App.Native;
 using JellyWallpaper.App.Wallpaper;
 using JellyWallpaper.Core.Config;
@@ -119,6 +120,12 @@ public sealed class MonitorRenderLayer : IDisposable
     /// <summary>所属 Composition 图形设备的底层 D2D 设备指针（诊断显示，非空即有效）</summary>
     private readonly IntPtr _ownerDevicePtr;
 
+    /// <summary>true = 手写 vtable 调用成功（BeginDraw/EndDraw 走原生指针，零封送）</summary>
+    private bool _useRawSurfaceCalls;
+
+    /// <summary>表面 COM 指针（CreateVisual 时 AddRef 缓存，Dispose 时 Release）</summary>
+    private IntPtr _surfaceComPtr;
+
     /// <summary>
     /// 在合成线程创建绘制表面 + 画笔视觉并启动渲染定时器。
     /// </summary>
@@ -144,6 +151,9 @@ public sealed class MonitorRenderLayer : IDisposable
         //    BeginDraw 用 pinned Guid 指针，排除 .NET 封送干扰）
         _surfaceInteropRaw = CompositionInterop.GetInterop<ICompositionDrawingSurfaceInteropRaw>(
             _surface, CompositionInterop.ICompositionDrawingSurfaceInteropIid);
+
+        // ②″ 表面原生 COM 指针（手写 vtable 调用用；AddRef 缓存，Dispose 释放）
+        _surfaceComPtr = Marshal.GetIUnknownForObject(_surfaceInteropRaw);
 
         // ③ 表面画笔 + 精灵视觉：Stretch=None（1:1 像素），
         //    Offset = 屏幕原点 - Progman 原点（DComp 坐标系以 Progman 为原点）
@@ -247,36 +257,43 @@ public sealed class MonitorRenderLayer : IDisposable
         }
 
         // ① BeginDraw：请求 ID2D1DeviceContext（整个表面更新）。
-        //    裸调用（[PreserveSig] + pinned Guid 指针）取原始 HRESULT。
-        //    v5.10 三组组合探测，一次定性"参数问题 or 表面问题"：
-        //      A) updateRect=NULL           （文档标准用法）
-        //      B) updateRect=整个表面 RECT  （排除 NULL 不被系统版接受）
-        //      C) Resize 试探                （排除表面本身无效/已销毁）
+        //    v5.11 主路径 = 手写 vtable 调用（零 .NET 封送，100% 原始 HRESULT）。
+        //    ComImport RCW 调用曾返回 0x80131509（.NET 异常码），无法区分
+        //    "原生拒绝"与"封送异常"；手写调用一锤定音。失败时再对比
+        //    ComImport 的码，并在状态栏同时显示两者。
         IntPtr ctxPtr = IntPtr.Zero;
+        IntPtr comPtr = _surfaceComPtr;
         var iidDc = CompositionInterop.IID_ID2D1DeviceContext;
-        int hrA = BeginDrawRaw(IntPtr.Zero, iidDc, out ctxPtr);
-        if (hrA < 0)
+
+        int hrRaw = CompositionInterop.RawBeginDraw(comPtr, IntPtr.Zero, iidDc, out ctxPtr, out _);
+        if (hrRaw >= 0)
         {
-            // A 失败 → 试组合 B（显式整个表面 RECT）
+            // 手写路径成功 → 用手写 EndDraw 提交（保持一致，不混用两条路）
+            _useRawSurfaceCalls = true;
+        }
+        else
+        {
+            // 手写失败 → 对比 ComImport 结果，并试显式 RECT
+            int hrImp = BeginDrawRaw(IntPtr.Zero, iidDc, out _);
             var rect = new RECTSTRUCT { Left = 0, Top = 0, Right = Bounds.Width, Bottom = Bounds.Height };
             var rGch = System.Runtime.InteropServices.GCHandle.Alloc(rect, System.Runtime.InteropServices.GCHandleType.Pinned);
-            int hrB;
+            int hrRawRect;
             try
             {
-                hrB = BeginDrawRaw(rGch.AddrOfPinnedObject(), iidDc, out ctxPtr);
+                hrRawRect = CompositionInterop.RawBeginDraw(comPtr, rGch.AddrOfPinnedObject(), iidDc, out ctxPtr, out _);
             }
             finally
             {
                 rGch.Free();
             }
-            if (hrB < 0)
+            if (hrRawRect < 0)
             {
-                // B 也失败 → 试组合 C：Resize 试探（表面是否有效）
                 var raw = _surfaceInteropRaw;
                 int hrC = raw?.Resize(Bounds.Width, Bounds.Height) ?? unchecked((int)0x80004003);
-                LastRenderError = $"BeginDraw失败 NULL=0x{hrA:X8} RECT=0x{hrB:X8} Resize=0x{hrC:X8} d2d=0x{_ownerDevicePtr:X}";
+                LastRenderError = $"BeginDraw失败 手写NULL=0x{hrRaw:X8} 手写RECT=0x{hrRawRect:X8} COM=0x{hrImp:X8} Resize=0x{hrC:X8} d2d=0x{_ownerDevicePtr:X}";
                 return;
             }
+            _useRawSurfaceCalls = true; // RECT 手写成功 → 也用原生态 EndDraw
         }
         if (ctxPtr == IntPtr.Zero)
         {
@@ -303,8 +320,9 @@ public sealed class MonitorRenderLayer : IDisposable
         try
         {
             // ③ 提交到合成表面（EndDraw 后 BeginDraw 返回的 ctx 指针失效）
-            var raw = _surfaceInteropRaw;
-            int hrEnd = raw?.EndDraw() ?? 0;
+            int hrEnd = _useRawSurfaceCalls
+                ? CompositionInterop.RawEndDraw(comPtr)
+                : (_surfaceInteropRaw?.EndDraw() ?? 0);
             if (hrEnd < 0)
             {
                 LastRenderError = $"EndDraw 失败 HRESULT=0x{hrEnd:X8}";
@@ -530,6 +548,12 @@ public sealed class MonitorRenderLayer : IDisposable
         {
             System.Runtime.InteropServices.Marshal.ReleaseComObject(_surfaceInterop);
             _surfaceInterop = null;
+        }
+        if (_surfaceComPtr != IntPtr.Zero)
+        {
+            // 配对 CreateVisual 时的 AddRef（GetIUnknownForObject）
+            System.Runtime.InteropServices.Marshal.Release(_surfaceComPtr);
+            _surfaceComPtr = IntPtr.Zero;
         }
         _wallpaperBmp?.Dispose();
         _wallpaperBmp = null;
