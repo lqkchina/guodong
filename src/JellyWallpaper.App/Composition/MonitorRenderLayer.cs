@@ -139,7 +139,16 @@ public sealed class MonitorRenderLayer : IDisposable
         }
         catch (Exception ex)
         {
-            InitError = "初始化失败 " + ex.GetType().Name + ": " + ex.Message;
+            // 带堆栈定位帧：状态栏直接显示异常抛出位置，无需翻日志
+            string where = "";
+            var sf = ex.StackTrace?.Split('\n').FirstOrDefault(l =>
+                l.Contains("JellyWallpaper") || l.Contains("D3D11") || l.Contains("RawDxgi"));
+            if (sf != null)
+            {
+                where = sf.Trim().TrimEnd('\r');
+                if (where.Length > 130) where = where[..130];
+            }
+            InitError = $"初始化失败 {ex.GetType().Name}: {ex.Message} @{where}";
             App.LogError("CreateVisual", ex);
         }
     }

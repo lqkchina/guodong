@@ -209,54 +209,75 @@ float4 PSMain(PSInput i) : SV_Target
         }
 
         // ── ③ 顶点缓冲（Dynamic，每帧更新形变位置）＋ 索引缓冲 ──────
-        _vertexBuffer = new Buffer(_d3d, new BufferDescription(
-            _vertexCount * 16, ResourceUsage.Dynamic, BindFlags.VertexBuffer,
-            CpuAccessFlags.Write, ResourceOptionFlags.None, 0));
-        _indexBuffer = new Buffer(_d3d, new BufferDescription(
-            _indexCount * 4, ResourceUsage.Immutable, BindFlags.IndexBuffer,
-            CpuAccessFlags.None, ResourceOptionFlags.None, 0));
-        BuildIndexData();
+        try
+        {
+            _vertexBuffer = new Buffer(_d3d, new BufferDescription(
+                _vertexCount * 16, ResourceUsage.Dynamic, BindFlags.VertexBuffer,
+                CpuAccessFlags.Write, ResourceOptionFlags.None, 0));
+            _indexBuffer = new Buffer(_d3d, new BufferDescription(
+                _indexCount * 4, ResourceUsage.Immutable, BindFlags.IndexBuffer,
+                CpuAccessFlags.None, ResourceOptionFlags.None, 0));
+            BuildIndexData();
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("顶点/索引缓冲创建失败 " + ex.Message, ex);
+        }
 
         // ── ④ 采样器（线性 + 边缘钳制，避免 UV 越界采样条纹）────────
-        _sampler = new SamplerState(_d3d, new SamplerStateDescription
+        try
         {
-            Filter = Filter.MinMagMipLinear,
-            AddressU = TextureAddressMode.Clamp,
-            AddressV = TextureAddressMode.Clamp,
-            AddressW = TextureAddressMode.Clamp,
-        });
+            _sampler = new SamplerState(_d3d, new SamplerStateDescription
+            {
+                Filter = Filter.MinMagMipLinear,
+                AddressU = TextureAddressMode.Clamp,
+                AddressV = TextureAddressMode.Clamp,
+                AddressW = TextureAddressMode.Clamp,
+            });
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("采样器创建失败 " + ex.Message, ex);
+        }
 
         // ── ⑤ 纯色兜底纹理（壁纸未加载时也能看到"果冻层"形变）──────
         //   4x4 深蓝灰 BGRA 像素，任意采样下都是同一颜色
-        var fallbackPx = new byte[4 * 4 * 4];
-        for (int i = 0; i < 4 * 4; i++)
-        {
-            fallbackPx[i * 4 + 0] = 40;      // B
-            fallbackPx[i * 4 + 1] = 44;      // G
-            fallbackPx[i * 4 + 2] = 52;      // R
-            fallbackPx[i * 4 + 3] = 255;     // A
-        }
-        var fallbackTex = new Texture2D(_d3d, new Texture2DDescription
-        {
-            Width = 4, Height = 4, MipLevels = 1, ArraySize = 1,
-            Format = Format.B8G8R8A8_UNorm,
-            SampleDescription = new SampleDescription(1, 0),
-            Usage = ResourceUsage.Default,
-            BindFlags = BindFlags.ShaderResource,
-            CpuAccessFlags = CpuAccessFlags.None,
-            OptionFlags = ResourceOptionFlags.None,
-        });
-        var fgch = System.Runtime.InteropServices.GCHandle.Alloc(fallbackPx, System.Runtime.InteropServices.GCHandleType.Pinned);
         try
         {
-            _ctx.UpdateSubresource(fallbackTex, 0, null, fgch.AddrOfPinnedObject(), 4 * 4, 0);
+            var fallbackPx = new byte[4 * 4 * 4];
+            for (int i = 0; i < 4 * 4; i++)
+            {
+                fallbackPx[i * 4 + 0] = 40;      // B
+                fallbackPx[i * 4 + 1] = 44;      // G
+                fallbackPx[i * 4 + 2] = 52;      // R
+                fallbackPx[i * 4 + 3] = 255;     // A
+            }
+            var fallbackTex = new Texture2D(_d3d, new Texture2DDescription
+            {
+                Width = 4, Height = 4, MipLevels = 1, ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.ShaderResource,
+                CpuAccessFlags = CpuAccessFlags.None,
+                OptionFlags = ResourceOptionFlags.None,
+            });
+            var fgch = System.Runtime.InteropServices.GCHandle.Alloc(fallbackPx, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                _ctx.UpdateSubresource(fallbackTex, 0, null, fgch.AddrOfPinnedObject(), 4 * 4, 0);
+            }
+            finally
+            {
+                fgch.Free();
+            }
+            _fallbackSrv = new ShaderResourceView(_d3d, fallbackTex);
+            fallbackTex.Dispose(); // SRV 已持有引用
         }
-        finally
+        catch (Exception ex)
         {
-            fgch.Free();
+            throw new InvalidOperationException("兜底纹理创建失败 " + ex.Message, ex);
         }
-        _fallbackSrv = new ShaderResourceView(_d3d, fallbackTex);
-        fallbackTex.Dispose(); // SRV 已持有引用
     }
 
     /// <summary>
