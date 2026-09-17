@@ -209,13 +209,15 @@ float4 PSMain(PSInput i) : SV_Target
         }
 
         // ── ③ 顶点缓冲（Dynamic，每帧更新形变位置）＋ 索引缓冲 ──────
+        //    注意：D3D11 规定 IMMUTABLE（不可变）缓冲创建时必须带初始数据，
+        //    否则返回 E_INVALIDARG —— 索引缓冲因此用 DEFAULT（创建后 UpdateSubresource 上传）。
         try
         {
             _vertexBuffer = new Buffer(_d3d, new BufferDescription(
                 _vertexCount * 16, ResourceUsage.Dynamic, BindFlags.VertexBuffer,
                 CpuAccessFlags.Write, ResourceOptionFlags.None, 0));
             _indexBuffer = new Buffer(_d3d, new BufferDescription(
-                _indexCount * 4, ResourceUsage.Immutable, BindFlags.IndexBuffer,
+                _indexCount * 4, ResourceUsage.Default, BindFlags.IndexBuffer,
                 CpuAccessFlags.None, ResourceOptionFlags.None, 0));
             BuildIndexData();
         }
