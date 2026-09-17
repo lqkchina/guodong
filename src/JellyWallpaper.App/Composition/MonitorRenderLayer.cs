@@ -62,22 +62,19 @@ public sealed class MonitorRenderLayer : IDisposable
     private readonly DispatcherQueue _queue;
 
     // 合成对象（合成线程创建/使用）
-    private CompositionDrawingSurface? _surface;
-    private ICompositionDrawingSurfaceInterop? _surfaceInterop; // COM 视图
-    private ICompositionDrawingSurfaceInteropRaw? _surfaceInteropRaw; // 裸 HRESULT 视图
+    private Rendering.D3D11SwapChainSurface? _d3dSurface; // v5.15 交换链渲染后端
+    private ICompositionSurface? _compSurface;             // 交换链挂载的合成表面
     private CompositionSurfaceBrush? _brush;
     private SpriteVisual? _visual;
     private DispatcherQueueTimer? _timer;
-
-    // Direct2D 壁纸位图（绑定合成线程的 D2D 设备）
-    private D2DBitmap? _wallpaperBmp;
-    private WallpaperImageInfo _source = new(null, null, DateTime.MinValue, WallpaperFillMode.Cover);
 
     // 后台解码完成后的像素（合成线程渲染帧消费，引用比较避免重复建位图）
     private volatile byte[]? _pendingPixels;
     private volatile int _pendingW, _pendingH;
     private volatile WallpaperImageInfo _pendingSource = new(null, null, DateTime.MinValue, WallpaperFillMode.Cover);
-    private byte[]? _loadedPixels; // 已建成位图的像素引用
+
+    // 壁纸尺寸（诊断显示；解码成功后更新）
+    private int _wallpaperW = 0, _wallpaperH = 0;
 
     private bool _disposed;
 
@@ -93,13 +90,13 @@ public sealed class MonitorRenderLayer : IDisposable
     /// <summary>最近一次渲染异常（BeginDraw/绘制失败时记录，不再静默吞掉）</summary>
     public string? LastRenderError { get; private set; }
 
-    /// <summary>壁纸纹理状态（位图尺寸或"未加载"；未加载时显示纯色背景）</summary>
+    /// <summary>壁纸纹理状态（位图尺寸或"未加载"；未加载时渲染纯色背景）</summary>
     public string TextureInfo
     {
         get
         {
             if (DecodeError != null) return $"解码失败:{DecodeError}";
-            return _wallpaperBmp == null ? "未加载" : $"{_wallpaperW:F0}x{_wallpaperH:F0}";
+            return _wallpaperW <= 0 ? "未加载" : $"{_wallpaperW}x{_wallpaperH}";
         }
     }
 
@@ -117,19 +114,10 @@ public sealed class MonitorRenderLayer : IDisposable
         _ownerDevicePtr = ownerDevicePtr;
     }
 
-    /// <summary>所属 Composition 图形设备的底层 D2D 设备指针（诊断显示，非空即有效）</summary>
+    /// <summary>所属 Composition 图形设备的底层 D3D11 设备指针（v5.15 交换链后端使用）</summary>
     private readonly IntPtr _ownerDevicePtr;
 
-    /// <summary>true = 手写 vtable 调用成功（BeginDraw/EndDraw 走原生指针，零封送）</summary>
-    private bool _useRawSurfaceCalls;
-
-    /// <summary>表面 COM 指针（CreateVisual 时 AddRef 缓存，Dispose 时 Release）</summary>
-    private IntPtr _surfaceComPtr;
-
-    /// <summary>路径②（Dev iid）时 BeginDraw 返回的设备指针，EndDraw 后释放</summary>
-    private IntPtr _devPtrToRelease;
-
-    /// <summary>本帧实际生效的绘制路径（①DC / ②Dev / ③RECT，状态栏诊断）</summary>
+    /// <summary>本帧实际生效的绘制路径（状态栏诊断；v5.15 = SwapChain）</summary>
     private string _renderPath = "";
 
     /// <summary>实际生效的绘制路径（状态栏显示）</summary>
@@ -137,36 +125,50 @@ public sealed class MonitorRenderLayer : IDisposable
 
     /// <summary>
     /// 在合成线程创建绘制表面 + 画笔视觉并启动渲染定时器。
+    /// v5.15：改用 DXGI 交换链后端（保底方案），完全绕开
+    /// ICompositionDrawingSurfaceInterop.BeginDraw 互操作。
     /// </summary>
     public void CreateVisual()
     {
-        var gd = _host.GraphicsDevice ?? throw new InvalidOperationException("宿主图形设备未初始化");
         var root = _host.Root ?? throw new InvalidOperationException("根容器未创建");
         var compositor = _host.Compositor ?? throw new InvalidOperationException("合成器未创建");
 
-        // ① 绘制表面：系统级 Composition 表面，像素尺寸 = 屏幕尺寸。
-        //    （预乘 alpha + BGRA8，与 Direct2D 默认格式一致）
-        _surface = gd.CreateDrawingSurface(
-            new Windows.Foundation.Size(Bounds.Width, Bounds.Height),
-            DirectXPixelFormat.B8G8R8A8UIntNormalized,
-            DirectXAlphaMode.Premultiplied);
+        // ① D3D11 交换链表面（网格顶点数 = 物理网格同口径）
+        float cell = (float)_config.Physics.GridCellSize;
+        int cols = (int)Math.Ceiling(Bounds.Width / cell) + 1;
+        int rows = (int)Math.Ceiling(Bounds.Height / cell) + 1;
+        _d3dSurface = new Rendering.D3D11SwapChainSurface();
+        _d3dSurface.Initialize(_ownerDevicePtr, Bounds.Width, Bounds.Height, cols, rows);
+        if (_d3dSurface.SwapChainPtr == IntPtr.Zero)
+            throw new InvalidOperationException("交换链创建失败: " + _d3dSurface.LastError);
 
-        // ② 表面的 COM 视图（BeginDraw/EndDraw）
-        //    （走 QueryInterface + RCW，不依赖 CsWinRT 内部 cast 行为）
-        _surfaceInterop = CompositionInterop.GetInterop<ICompositionDrawingSurfaceInterop>(
-            _surface, CompositionInterop.ICompositionDrawingSurfaceInteropIid);
+        // ② Composition 表面：交换链直挂（官方动态壁纸路径，无 BeginDraw）
+        IntPtr surfacePtr = IntPtr.Zero;
+        var compositorInterop = CompositionInterop.GetInterop<ICompositorInterop>(
+            compositor, CompositionInterop.ICompositorInteropIid);
+        try
+        {
+            compositorInterop.CreateCompositionSurfaceForSwapChain(_d3dSurface.SwapChainPtr, out surfacePtr);
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(compositorInterop);
+        }
+        if (surfacePtr == IntPtr.Zero)
+            throw new InvalidOperationException("CreateCompositionSurfaceForSwapChain 返回空指针");
 
-        // ②′ 同一接口的"裸调用"视图（[PreserveSig] 拿原始 HRESULT，
-        //    BeginDraw 用 pinned Guid 指针，排除 .NET 封送干扰）
-        _surfaceInteropRaw = CompositionInterop.GetInterop<ICompositionDrawingSurfaceInteropRaw>(
-            _surface, CompositionInterop.ICompositionDrawingSurfaceInteropIid);
-
-        // ②″ 表面原生 COM 指针（手写 vtable 调用用；AddRef 缓存，Dispose 释放）
-        _surfaceComPtr = Marshal.GetIUnknownForObject(_surfaceInteropRaw);
+        try
+        {
+            _compSurface = WinRT.MarshalInspectable<ICompositionSurface>.FromAbi(surfacePtr);
+        }
+        finally
+        {
+            Marshal.Release(surfacePtr); // FromAbi 已 AddRef
+        }
 
         // ③ 表面画笔 + 精灵视觉：Stretch=None（1:1 像素），
         //    Offset = 屏幕原点 - Progman 原点（DComp 坐标系以 Progman 为原点）
-        _brush = compositor.CreateSurfaceBrush(_surface);
+        _brush = compositor.CreateSurfaceBrush(_compSurface);
         _brush.Stretch = CompositionStretch.None;
         _visual = compositor.CreateSpriteVisual();
         _visual.Brush = _brush;
@@ -249,11 +251,10 @@ public sealed class MonitorRenderLayer : IDisposable
         });
     }
 
-    /// <summary>渲染一帧：BeginDraw → Direct2D 绘制 → EndDraw 提交合成</summary>
+    /// <summary>渲染一帧：D3D11 交换链后端（v5.15，绕开 BeginDraw 互操作）</summary>
     private void OnRenderTick(DispatcherQueueTimer sender, object args)
     {
-        var interop = _surfaceInterop;
-        if (_disposed || interop == null) return;
+        if (_disposed || _d3dSurface == null) return;
 
         // 帧率统计（最近 1 秒均值，UI 状态栏显示）
         _tickCount++;
@@ -265,115 +266,30 @@ public sealed class MonitorRenderLayer : IDisposable
             _fpsWindowTicks = _tickCount;
         }
 
-        // ① BeginDraw：手写 vtable 调用（零封送），v5.14：
-        //    v5.13 实证 RECT 路径 S_OK、设备探测 S_OK，但 out 对象指针为空
-        //    → 怀疑 out POINTSTRUCT（第 5 参数）在 x64 调用约定下干扰了
-        //    updateObject 写入。本版主路径 = RECT + DC-iid + updateOffset=NULL
-        //    （原生允许 NULL），若成功即修复；失败则对比旧调用。
-        IntPtr ctxPtr = IntPtr.Zero;
-        IntPtr comPtr = _surfaceComPtr;
-        var iidDc = CompositionInterop.IID_ID2D1DeviceContext;
-        string path;
-
-        var rect = new RECTSTRUCT { Left = 0, Top = 0, Right = Bounds.Width, Bottom = Bounds.Height };
-        var rGch = System.Runtime.InteropServices.GCHandle.Alloc(rect, System.Runtime.InteropServices.GCHandleType.Pinned);
-        int hrMain;
         try
         {
-            hrMain = CompositionInterop.RawBeginDrawNoOffset(comPtr, rGch.AddrOfPinnedObject(), iidDc, out ctxPtr);
-        }
-        finally
-        {
-            rGch.Free();
-        }
+            // ① 物理网格快照（物理线程写、渲染线程只读）
+            var grid = Grid;
+            float[]? sx = grid?.SnapX;
+            float[]? sy = grid?.SnapY;
+            int cols = grid?.Cols ?? (int)Math.Ceiling(Bounds.Width / _config.Physics.GridCellSize) + 1;
+            int rows = grid?.Rows ?? (int)Math.Ceiling(Bounds.Height / _config.Physics.GridCellSize) + 1;
+            float cell = (float)_config.Physics.GridCellSize;
 
-        if (hrMain >= 0 && ctxPtr != IntPtr.Zero)
-        {
-            path = "RECT+DC+NoOff";
-        }
-        else
-        {
-            // 对比：带 offset 的旧调用（v5.13 行为）
-            IntPtr ctxOld = IntPtr.Zero;
-            int hrOld = CompositionInterop.RawBeginDraw(comPtr, IntPtr.Zero, iidDc, out ctxOld, out _);
-            if (hrOld >= 0 && ctxOld != IntPtr.Zero)
-            {
-                ctxPtr = ctxOld;
-                path = "NULL+DC+Off";
-            }
-            else
-            {
-                // 设备链验证（CreateDeviceContext 成功 = 设备有效）
-                int hrDev = CompositionInterop.RawCreateDeviceContext(_ownerDevicePtr, out _);
-                LastRenderError = $"BeginDraw NoOff=0x{hrMain:X8} Off=0x{hrOld:X8} 设备探测=0x{hrDev:X8} d2d=0x{_ownerDevicePtr:X}";
-                return;
-            }
-        }
-        _renderPath = path;
-        _useRawSurfaceCalls = true;
-        if (ctxPtr == IntPtr.Zero)
-        {
-            LastRenderError = "BeginDraw 返回空指针（GPU 设备丢失）";
-            return;
-        }
+            // ② 壁纸像素（后台解码；未加载时传 null → 纯色兜底纹理）
+            byte[]? px = _pendingPixels;
+            int tw = _pendingW, th = _pendingH;
+            if (px != null) { _wallpaperW = tw; _wallpaperH = th; }
 
-        try
-        {
-            using (var ctx = new D2DContext(ctxPtr))
-            {
-                // ② 绘制（内部会先消费后台解码好的像素 → 建位图）
-                var grid = Grid;
-                DrawWallpaper(ctx, grid);
-            }
+            // ③ 渲染到交换链（内部：顶点更新 → 纹理 → 绘制 → Present）
+            _d3dSurface.Render(sx, sy, cols, rows, cell, px, tw, th, Bounds.Width, Bounds.Height);
+            _renderPath = "SwapChain";
+            LastRenderError = _d3dSurface.LastError.Length > 0 ? "渲染失败 " + _d3dSurface.LastError : null;
         }
         catch (Exception ex)
         {
-            // 绘制阶段失败（纹理/位图/尺寸问题）—— 单帧跳过，不崩溃
-            LastRenderError = "绘制失败 " + DescribeException(ex);
-            return;
-        }
-
-        try
-        {
-            // ③ 提交到合成表面（EndDraw 后 BeginDraw 返回的 ctx 指针失效）
-            int hrEnd = _useRawSurfaceCalls
-                ? CompositionInterop.RawEndDraw(comPtr)
-                : (_surfaceInteropRaw?.EndDraw() ?? 0);
-            if (hrEnd < 0)
-            {
-                LastRenderError = $"EndDraw 失败 HRESULT=0x{hrEnd:X8}";
-                return;
-            }
-            // 路径②（Dev iid）时：EndDraw 后释放 BeginDraw 返回的设备引用
-            if (_devPtrToRelease != IntPtr.Zero)
-            {
-                Marshal.Release(_devPtrToRelease);
-                _devPtrToRelease = IntPtr.Zero;
-            }
-        }
-        catch (Exception ex)
-        {
-            LastRenderError = "EndDraw失败 " + DescribeException(ex);
-            return;
-        }
-
-        LastRenderError = null; // 本帧成功，清除历史错误提示
-    }
-
-    /// <summary>BeginDraw 裸调用：pinned Guid 指针传 iid，返回原始 HRESULT</summary>
-    private int BeginDrawRaw(IntPtr updateRectPtr, Guid iid, out IntPtr ctxPtr)
-    {
-        ctxPtr = IntPtr.Zero;
-        var raw = _surfaceInteropRaw;
-        if (raw == null) return unchecked((int)0x80004003); // E_POINTER
-        var gch = System.Runtime.InteropServices.GCHandle.Alloc(iid, System.Runtime.InteropServices.GCHandleType.Pinned);
-        try
-        {
-            return raw.BeginDraw(updateRectPtr, gch.AddrOfPinnedObject(), out ctxPtr, out _);
-        }
-        finally
-        {
-            gch.Free();
+            // 渲染异常不崩溃：记录后继续下一帧
+            LastRenderError = "渲染失败 " + DescribeException(ex);
         }
     }
 
@@ -397,128 +313,6 @@ public sealed class MonitorRenderLayer : IDisposable
         return $"{ex.GetType().Name}: {ex.Message}{hr} @{method}";
     }
 
-    /// <summary>
-    /// 绘制一帧壁纸。
-    /// 静止（无位移）：整图一次 DrawBitmap —— 零开销；
-    /// 形变中：逐网格单元仿射变换 DrawBitmap —— 果冻效果核心。
-    /// </summary>
-    private void DrawWallpaper(D2DContext ctx, SpringMassGrid? grid)
-    {
-        // 首次消费后台解码好的像素：用当前 ctx 建 Direct2D 位图
-        //（位图绑定 D2D 设备，跨帧有效；引用比较避免重复重建）
-        var pending = _pendingPixels;
-        if (pending != null && !ReferenceEquals(pending, _loadedPixels))
-        {
-            try
-            {
-                BuildBitmap(ctx, pending, _pendingW, _pendingH, _pendingSource);
-            }
-            catch { /* 建位图失败：保留上一张 */ }
-            _loadedPixels = pending;
-        }
-
-        var bmp = _wallpaperBmp;
-        if (bmp == null)
-        {
-            ctx.Clear(ParseRawColor4(_config.FallbackColorHex));
-            return;
-        }
-
-        // 源裁剪矩形（位图像素坐标，Cover/Stretch/Center 适配，与静止层对齐）
-        WallpaperLayout.ComputePlacement(
-            new SizeF(_wallpaperW, _wallpaperH), Bounds.Size,
-            _source.FillMode, out _, out var crop);
-
-        var srcFull = new RawRectangleF(crop.X, crop.Y,
-                                        crop.X + crop.Width, crop.Y + crop.Height);
-
-        // 静止（或网格未就绪）：整图一次（CPU/GPU 均最低开销）
-        if (grid == null || grid.LastMaxDisplacement < 0.5f)
-        {
-            ctx.DrawBitmap(bmp, new RawRectangleF(0, 0, Bounds.Width, Bounds.Height),
-                           1f, SharpDX.Direct2D1.BitmapInterpolationMode.Linear, srcFull);
-            return;
-        }
-
-        // ── 形变中：逐单元仿射变换 ─────────────────────────────────
-        // 力学背景：每个网格单元静止时对应纹理上 (ustep × vstep) 像素
-        // 的源区域；形变后单元被弹簧质点拉成任意四边形。Direct2D 的
-        // DrawBitmap 只支持仿射（平行四边形）变换，这里用单元内三顶点
-        // （左上/右上/左下）确定仿射矩阵，把 [0,cell]² 映射到形变后的
-        // 位置 —— 视觉上呈现平滑拉伸的果冻效果（v3 Win2D 版同款算法）。
-        float cell = (float)grid.CellSize;
-        int cols = grid.Cols, rows = grid.Rows;
-        float us0 = crop.X, vs0 = crop.Y;
-        float ustep = crop.Width / (float)grid.Width * cell;
-        float vstep = crop.Height / (float)grid.Height * cell;
-
-        float[] sx = grid.SnapX;
-        float[] sy = grid.SnapY;
-        // RawMatrix3x2 无静态 Identity，用单位矩阵字面量
-        var identity = new RawMatrix3x2(1f, 0f, 0f, 1f, 0f, 0f);
-
-        for (int r = 0; r < rows - 1; r++)
-        {
-            int rowBase = r * cols;
-            int rowNext = rowBase + cols;
-            float vsrc = vs0 + r * vstep;
-            for (int c = 0; c < cols - 1; c++)
-            {
-                int i00 = rowBase + c;
-                int i10 = i00 + 1;
-                int i01 = rowNext + c;
-
-                // 仿射矩阵：把 (x,y)∈[0,cell]² 映到
-                //   左上(sx[i00],sy[i00])、右上(sx[i10],sy[i10])、
-                //   左下(sx[i01],sy[i01]) 确定的平行四边形。
-                //   矩阵元素 = 两相邻边的向量 / cell：
-                //     M11 = Δx右/cell,  M12 = Δy右/cell  （x 轴基向量）
-                //     M21 = Δx下/cell,  M22 = Δy下/cell  （y 轴基向量）
-                //     M31 = 左上x,      M32 = 左上y       （平移）
-                float m11 = (sx[i10] - sx[i00]) / cell;
-                float m12 = (sy[i10] - sy[i00]) / cell;
-                float m21 = (sx[i01] - sx[i00]) / cell;
-                float m22 = (sy[i01] - sy[i00]) / cell;
-
-                ctx.Transform = new RawMatrix3x2(m11, m12, m21, m22, sx[i00], sy[i00]);
-                ctx.DrawBitmap(bmp,
-                               new RawRectangleF(0, 0, cell, cell),
-                               1f, SharpDX.Direct2D1.BitmapInterpolationMode.Linear,
-                               new RawRectangleF(us0 + c * ustep, vsrc, ustep, vstep));
-                ctx.Transform = identity;
-            }
-        }
-    }
-
-    /// <summary>用像素数组创建 Direct2D 位图（B8G8R8A8 预乘）</summary>
-    private void BuildBitmap(D2DContext ctx, byte[] pixels, int w, int h, WallpaperImageInfo info)
-    {
-        var gch = System.Runtime.InteropServices.GCHandle.Alloc(pixels,
-            System.Runtime.InteropServices.GCHandleType.Pinned);
-        try
-        {
-            var props = new SharpDX.Direct2D1.BitmapProperties(
-                new SharpDX.Direct2D1.PixelFormat(SharpDX.DXGI.Format.B8G8R8A8_UNorm,
-                                                  SharpDX.Direct2D1.AlphaMode.Premultiplied));
-            var bmp = new D2DBitmap(ctx, new SharpDX.Size2(w, h),
-                                    new SharpDX.DataPointer(gch.AddrOfPinnedObject(), w * 4),
-                                    w * 4, props);
-
-            _wallpaperBmp?.Dispose();
-            _wallpaperBmp = bmp;
-            _wallpaperW = w;
-            _wallpaperH = h;
-            _source = info;
-        }
-        finally
-        {
-            gch.Free();
-        }
-    }
-
-    private float _wallpaperW, _wallpaperH;
-
-    /// <summary>把内嵌 BMP 写为临时文件（TranscodedImageCache 缓存路径失效时的兜底）</summary>
     private static string? WriteTempBmp(byte[] bmpData)
     {
         try
@@ -565,23 +359,12 @@ public sealed class MonitorRenderLayer : IDisposable
 
         _visual?.Dispose();
         _brush?.Dispose();
-        _surface?.Dispose();
-        if (_surfaceInterop != null)
-        {
-            System.Runtime.InteropServices.Marshal.ReleaseComObject(_surfaceInterop);
-            _surfaceInterop = null;
-        }
-        if (_surfaceComPtr != IntPtr.Zero)
-        {
-            // 配对 CreateVisual 时的 AddRef（GetIUnknownForObject）
-            System.Runtime.InteropServices.Marshal.Release(_surfaceComPtr);
-            _surfaceComPtr = IntPtr.Zero;
-        }
-        _wallpaperBmp?.Dispose();
-        _wallpaperBmp = null;
+        System.Runtime.InteropServices.Marshal.ReleaseComObject(_compSurface);
+        _d3dSurface?.Dispose(); // 内部释放交换链 / 纹理 / 缓冲 / shader
         _visual = null;
         _brush = null;
-        _surface = null;
+        _compSurface = null;
+        _d3dSurface = null;
     }
 }
 
