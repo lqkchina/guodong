@@ -379,7 +379,11 @@ float4 PSMain(PSInput i) : SV_Target
                 break;
             default: // 10 Fill (Cover) + 22 跨区
             {
-                float scale = MathF.Max(texWf / screenW, texHf / screenH);
+                // 关键修正（v5.25）：Cover 的缩放系数 = 壁纸/屏幕比例的"较小值"
+                // （此前误用 Max → 源区域超过壁纸尺寸 → 大图只显示一部分/边缘拉伸）
+                // scale = min(tw/sw, th/sh)，源区域 = 屏幕×scale ≤ 壁纸，
+                // 居中裁掉多余 → 大图正确铺满整个屏幕。
+                float scale = MathF.Min(texWf / screenW, texHf / screenH);
                 srcW = screenW * scale;
                 srcH = screenH * scale;
                 srcX = (texWf - srcW) / 2f;

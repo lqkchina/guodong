@@ -57,14 +57,6 @@ public sealed class AppConfig
                 var cfg = JsonSerializer.Deserialize<AppConfig>(json, JsonOpts);
                 if (cfg != null)
                 {
-                    // v5.24：旧版配置（ConfigVersion<2）自动升级 —— 物理参数
-                    // 重置为新的 Q 弹默认值，避免被旧版"手感过时"的参数覆盖。
-                    if (cfg.ConfigVersion < 2)
-                    {
-                        cfg.ConfigVersion = 2;
-                        cfg.Physics = new PhysicsParams();
-                        cfg.Save();
-                    }
                     return cfg;
                 }
             }
