@@ -47,9 +47,9 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="网格尺寸" Grid.Column="0"/>
-                <TextBlock x:Name="LblGrid" Grid.Column="1" Text="32 px" Foreground="Gray"/>
+                <TextBlock x:Name="LblGrid" Grid.Column="1" Text="48 px" Foreground="Gray"/>
             </Grid>
-            <Slider x:Name="SGrid" Minimum="8" Maximum="64" Style="{StaticResource ParamSlider}"
+            <Slider x:Name="SGrid" Minimum="12" Maximum="120" Style="{StaticResource ParamSlider}"
                     ValueChanged="SGrid_Changed"/>
 
             <!-- ② 弹簧刚度 -->
@@ -59,9 +59,9 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="弹簧刚度 Stiffness（回弹力度）" Grid.Column="0"/>
-                <TextBlock x:Name="LblStiffness" Grid.Column="1" Text="120" Foreground="Gray"/>
+                <TextBlock x:Name="LblStiffness" Grid.Column="1" Text="60" Foreground="Gray"/>
             </Grid>
-            <Slider x:Name="SStiffness" Minimum="20" Maximum="400" Style="{StaticResource ParamSlider}"
+            <Slider x:Name="SStiffness" Minimum="5" Maximum="400" Style="{StaticResource ParamSlider}"
                     ValueChanged="SStiffness_Changed"/>
 
             <!-- ③ 阻尼 -->
@@ -71,9 +71,9 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="阻尼 Damping（抑制震荡）" Grid.Column="0"/>
-                <TextBlock x:Name="LblDamping" Grid.Column="1" Text="0.25" Foreground="Gray"/>
+                <TextBlock x:Name="LblDamping" Grid.Column="1" Text="0.08" Foreground="Gray"/>
             </Grid>
-            <Slider x:Name="SDamping" Minimum="0" Maximum="1" TickFrequency="0.01"
+            <Slider x:Name="SDamping" Minimum="0" Maximum="0.5" TickFrequency="0.01"
                     Style="{StaticResource ParamSlider}" ValueChanged="SDamping_Changed"/>
 
             <!-- ④ 拖拽影响半径 -->
@@ -83,9 +83,9 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="拖拽影响半径" Grid.Column="0"/>
-                <TextBlock x:Name="LblDragRadius" Grid.Column="1" Text="220 px" Foreground="Gray"/>
+                <TextBlock x:Name="LblDragRadius" Grid.Column="1" Text="300 px" Foreground="Gray"/>
             </Grid>
-            <Slider x:Name="SDragRadius" Minimum="50" Maximum="500" Style="{StaticResource ParamSlider}"
+            <Slider x:Name="SDragRadius" Minimum="50" Maximum="800" Style="{StaticResource ParamSlider}"
                     ValueChanged="SDragRadius_Changed"/>
 
             <!-- ⑤ 拖拽强度 -->
@@ -95,9 +95,9 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="拖拽强度系数" Grid.Column="0"/>
-                <TextBlock x:Name="LblDragStrength" Grid.Column="1" Text="0.85" Foreground="Gray"/>
+                <TextBlock x:Name="LblDragStrength" Grid.Column="1" Text="1.00" Foreground="Gray"/>
             </Grid>
-            <Slider x:Name="SDragStrength" Minimum="0.1" Maximum="2" TickFrequency="0.01"
+            <Slider x:Name="SDragStrength" Minimum="0.1" Maximum="3" TickFrequency="0.01"
                     Style="{StaticResource ParamSlider}" ValueChanged="SDragStrength_Changed"/>
 
             <!-- ⑥ 最大位移 -->
@@ -107,9 +107,9 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="质点最大位移限制（防极端扭曲）" Grid.Column="0"/>
-                <TextBlock x:Name="LblMaxDisp" Grid.Column="1" Text="160 px" Foreground="Gray"/>
+                <TextBlock x:Name="LblMaxDisp" Grid.Column="1" Text="240 px" Foreground="Gray"/>
             </Grid>
-            <Slider x:Name="SMaxDisp" Minimum="20" Maximum="400" Style="{StaticResource ParamSlider}"
+            <Slider x:Name="SMaxDisp" Minimum="20" Maximum="600" Style="{StaticResource ParamSlider}"
                     ValueChanged="SMaxDisp_Changed"/>
 
             <TextBlock x:Name="TxtStatusDetail" Foreground="DimGray" FontSize="12"

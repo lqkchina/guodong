@@ -303,18 +303,18 @@ float4 PSMain(PSInput i) : SV_Target
     /// <param name="cellSize">网格单元像素尺寸（UV 映射用）</param>
     /// <param name="pixels">壁纸 BGRA 像素（null = 纯色兜底）</param>
     public void Render(float[]? snapX, float[]? snapY, int cols, int rows, float cellSize,
-                       byte[]? pixels, int texW, int texH, int screenW, int screenH)
+                       byte[]? pixels, int texW, int texH, int screenW, int screenH,
+                       int fitMode = 10)
     {
         if (_disposed || _swapChain == null) return;
         try
         {
             EnsureWallpaperTexture(pixels, texW, texH);
-            UpdateVertices(snapX, snapY, cols, rows, cellSize, screenW, screenH, texW, texH);
+            UpdateVertices(snapX, snapY, cols, rows, cellSize, screenW, screenH, texW, texH, fitMode);
 
             _ctx.OutputMerger.SetRenderTargets(_rtv);
-            // 诊断色：亮品红 —— 若桌面显示品红，说明合成层已上屏、清屏生效，
-            // 问题只在壁纸纹理绘制；若桌面仍黑，说明 DComp 视觉未上屏。
-            _ctx.ClearRenderTargetView(_rtv, new RawColor4(1.0f, 0.0f, 1.0f, 1f));
+            // 清屏色：深蓝灰（合成层正常时被壁纸网格完全覆盖，仅纹理缺失时可见）
+            _ctx.ClearRenderTargetView(_rtv, new RawColor4(0.08f, 0.10f, 0.14f, 1f));
 
             _ctx.InputAssembler.InputLayout = _layout;
             _ctx.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleList;
@@ -338,13 +338,58 @@ float4 PSMain(PSInput i) : SV_Target
     }
 
     /// <summary>更新顶点缓冲：物理网格形变位置 → NDC + UV</summary>
+    /// <param name="fitMode">壁纸放置模式（0=居中 1=平铺[按拉伸] 2=拉伸 6=适应 10=填充/默认）</param>
     private void UpdateVertices(float[]? snapX, float[]? snapY, int cols, int rows,
-                                float cellSize, int screenW, int screenH, int texW, int texH)
+                                float cellSize, int screenW, int screenH, int texW, int texH,
+                                int fitMode = 10)
     {
         int vc = cols * rows;
         if (_vertexData.Length != vc * 4) _vertexData = new float[vc * 4];
         float invW = 2f / screenW, invH = 2f / screenH;
         float texWf = texW > 0 ? texW : screenW, texHf = texH > 0 ? texH : screenH;
+
+        // ── UV 映射：把"壁纸源区域(srcX,srcY,srcW,srcH)"映射到整个屏幕 ──
+        //    v5.23：按系统放置模式计算，大图不再 1:1 裁剪（此前只显示左上角）。
+        //    10 填充/22 跨区=Cover：等比放大铺满，居中裁掉多余部分（系统默认）
+        //    2  拉伸=Stretch：整图拉伸到屏幕（比例可能变形）
+        //    6  适应=Contain：等比缩放完整可见（四周可能有黑边）
+        //    0  居中=Center：原始像素尺寸，屏幕居中
+        //    1  平铺：简化按拉伸处理（与 2 相同）
+        float srcX = 0f, srcY = 0f, srcW = texWf, srcH = texHf;
+        switch (fitMode)
+        {
+            case 0: // Center
+                srcX = (texWf - screenW) / 2f;
+                srcY = (texHf - screenH) / 2f;
+                srcW = screenW;
+                srcH = screenH;
+                break;
+            case 6: // Fit (Contain)
+            {
+                float scale = MathF.Min(texWf / screenW, texHf / screenH);
+                srcW = texWf / scale;
+                srcH = texHf / scale;
+                srcX = (texWf - srcW) / 2f;
+                srcY = (texHf - srcH) / 2f;
+                break;
+            }
+            case 2: // Stretch（含平铺简化）
+            case 1:
+                srcX = 0; srcY = 0; srcW = texWf; srcH = texHf;
+                break;
+            default: // 10 Fill (Cover) + 22 跨区
+            {
+                float scale = MathF.Max(texWf / screenW, texHf / screenH);
+                srcW = screenW * scale;
+                srcH = screenH * scale;
+                srcX = (texWf - srcW) / 2f;
+                srcY = (texHf - srcH) / 2f;
+                break;
+            }
+        }
+        float u0 = srcX / texWf, v0 = srcY / texHf;
+        float uScale = srcW / texWf / screenW;   // 每屏幕像素对应的 UV 增量
+        float vScale = srcH / texHf / screenH;
 
         for (int r = 0; r < rows; r++)
         {
@@ -357,9 +402,9 @@ float4 PSMain(PSInput i) : SV_Target
                 // 屏幕像素 → NDC（D3D Y 轴向上，取反）
                 _vertexData[vi] = px * invW - 1f;
                 _vertexData[vi + 1] = 1f - py * invH;
-                // UV = 未形变网格坐标 / 壁纸尺寸（1:1 映射语义）
-                _vertexData[vi + 2] = c * cellSize / texWf;
-                _vertexData[vi + 3] = r * cellSize / texHf;
+                // UV：网格屏幕坐标 → 壁纸源区域映射
+                _vertexData[vi + 2] = u0 + px * uScale;
+                _vertexData[vi + 3] = v0 + py * vScale;
             }
         }
         // Dynamic 缓冲正统更新：Map(WriteDiscard) + 拷贝（避免驱动对
