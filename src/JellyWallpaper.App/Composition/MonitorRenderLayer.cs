@@ -127,8 +127,27 @@ public sealed class MonitorRenderLayer : IDisposable
     /// 在合成线程创建绘制表面 + 画笔视觉并启动渲染定时器。
     /// v5.15：改用 DXGI 交换链后端（保底方案），完全绕开
     /// ICompositionDrawingSurfaceInterop.BeginDraw 互操作。
+    /// v5.16：整体 try-catch —— 初始化任何一步失败都只记录错误
+    /// （状态栏 + error.log），绝不抛出到合成线程导致进程崩溃。
     /// </summary>
     public void CreateVisual()
+    {
+        try
+        {
+            CreateVisualCore();
+            InitError = null;
+        }
+        catch (Exception ex)
+        {
+            InitError = "初始化失败 " + ex.GetType().Name + ": " + ex.Message;
+            App.LogError("CreateVisual", ex);
+        }
+    }
+
+    /// <summary>初始化失败原因（成功创建后清空；状态栏显示）</summary>
+    public string? InitError { get; private set; }
+
+    private void CreateVisualCore()
     {
         var root = _host.Root ?? throw new InvalidOperationException("根容器未创建");
         var compositor = _host.Compositor ?? throw new InvalidOperationException("合成器未创建");

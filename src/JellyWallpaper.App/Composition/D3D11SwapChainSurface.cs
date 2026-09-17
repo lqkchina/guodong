@@ -72,8 +72,23 @@ public sealed class D3D11SwapChainSurface : IDisposable
     /// <summary>
     /// 初始化：创建 Composition 交换链 + D3D11 渲染资源。
     /// cols/rows = 物理网格顶点数（含 +1，与 SpringMassGrid 一致）。
+    /// v5.16：逐步 try-catch，失败异常消息带步骤名，便于日志定位。
     /// </summary>
     public void Initialize(IntPtr d3dDevicePtr, int width, int height, int cols, int rows)
+    {
+        try
+        {
+            InitializeCore(d3dDevicePtr, width, height, cols, rows);
+        }
+        catch (Exception ex)
+        {
+            _lastError = "Initialize[" + ex.GetType().Name + "] " + ex.Message;
+            Dispose();
+            throw;
+        }
+    }
+
+    private void InitializeCore(IntPtr d3dDevicePtr, int width, int height, int cols, int rows)
     {
         _screenW = width;
         _screenH = height;
@@ -83,8 +98,15 @@ public sealed class D3D11SwapChainSurface : IDisposable
         _indexCount = (cols - 1) * (rows - 1) * 6;
 
         // 包装现有 D3D11 设备（共享 GPU 设备；不新建）
-        _d3d = new Device(d3dDevicePtr);
-        _ctx = _d3d.ImmediateContext;
+        try
+        {
+            _d3d = new Device(d3dDevicePtr);
+            _ctx = _d3d.ImmediateContext;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("D3D11 设备包装失败 " + ex.Message, ex);
+        }
 
         // ── ① DXGI 交换链（Flip 模型，Composition 专用）─────────────
         //    SharpDX 4.2.0 netstandard1.1 裁剪了 Factory2.CreateSwapChainForComposition，
@@ -117,6 +139,10 @@ public sealed class D3D11SwapChainSurface : IDisposable
                     throw new InvalidOperationException($"CreateSwapChainForComposition HRESULT=0x{hr:X8}");
                 _swapChain = new SwapChain1(swapChainPtr);
             }
+            catch (Exception ex) when (ex is not InvalidOperationException)
+            {
+                throw new InvalidOperationException("交换链创建失败 " + ex.Message, ex);
+            }
             finally
             {
                 dGch.Free();
@@ -125,8 +151,15 @@ public sealed class D3D11SwapChainSurface : IDisposable
         if (_swapChain == null)
             throw new InvalidOperationException("CreateSwapChainForComposition 返回 null");
 
-        _backBuffer = _swapChain.GetBackBuffer<Texture2D>(0);
-        _rtv = new RenderTargetView(_d3d, _backBuffer);
+        try
+        {
+            _backBuffer = _swapChain.GetBackBuffer<Texture2D>(0);
+            _rtv = new RenderTargetView(_d3d, _backBuffer);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("后台缓冲/RTV 创建失败 " + ex.Message, ex);
+        }
 
         // ── ② 最小 HLSL：顶点变换（NDC 直通）+ 纹理采样 ──────────────
         //   （无矩阵：位置已由物理网格在 CPU 转成 NDC；UV 来自网格原始坐标）
@@ -150,22 +183,29 @@ float4 PSMain(PSInput i) : SV_Target
     return tex.Sample(samp, i.uv);
 }
 ";
-        var vsBytecode = ShaderBytecode.Compile(hlsl, "VSMain", "vs_4_0", ShaderFlags.None);
-        var psBytecode = ShaderBytecode.Compile(hlsl, "PSMain", "ps_4_0", ShaderFlags.None);
         try
         {
-            _vs = new VertexShader(_d3d, vsBytecode);
-            _ps = new PixelShader(_d3d, psBytecode);
-            _layout = new InputLayout(_d3d, vsBytecode, new[]
+            var vsBytecode = ShaderBytecode.Compile(hlsl, "VSMain", "vs_4_0", ShaderFlags.None);
+            var psBytecode = ShaderBytecode.Compile(hlsl, "PSMain", "ps_4_0", ShaderFlags.None);
+            try
             {
-                new InputElement("POSITION", 0, Format.R32G32_Float, 0, 0),
-                new InputElement("TEXCOORD", 0, Format.R32G32_Float, 8, 0),
-            });
+                _vs = new VertexShader(_d3d, vsBytecode);
+                _ps = new PixelShader(_d3d, psBytecode);
+                _layout = new InputLayout(_d3d, vsBytecode, new[]
+                {
+                    new InputElement("POSITION", 0, Format.R32G32_Float, 0, 0),
+                    new InputElement("TEXCOORD", 0, Format.R32G32_Float, 8, 0),
+                });
+            }
+            finally
+            {
+                vsBytecode.Dispose();
+                psBytecode.Dispose();
+            }
         }
-        finally
+        catch (Exception ex)
         {
-            vsBytecode.Dispose();
-            psBytecode.Dispose();
+            throw new InvalidOperationException("Shader 编译/创建失败 " + ex.Message, ex);
         }
 
         // ── ③ 顶点缓冲（Dynamic，每帧更新形变位置）＋ 索引缓冲 ──────

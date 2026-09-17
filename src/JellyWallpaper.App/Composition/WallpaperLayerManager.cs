@@ -81,8 +81,10 @@ public sealed class WallpaperLayerManager : IDisposable
             if (layers.Count == 0) return "无渲染层（尚未挂载完成）";
             var l = layers[0];
             string renderErr = l.LastRenderError ?? "";
+            string initErr = l.InitError ?? "";
             string path = l.RenderPath;
-            return $"FPS={l.RenderFps:F0} 纹理={l.TextureInfo} 壁纸读取={WallpaperSource.LastReadInfo} {_simulation.LastDragInfo} {_host.HostWindowInfo}{(path.Length > 0 ? $" 路径={path}" : "")}{(renderErr.Length > 0 ? " 渲染异常:" + renderErr : "")}";
+            string initPart = initErr.Length > 0 ? " 初始化异常:" + initErr : "";
+            return $"FPS={l.RenderFps:F0} 纹理={l.TextureInfo} 壁纸读取={WallpaperSource.LastReadInfo} {_simulation.LastDragInfo} {_host.HostWindowInfo}{(path.Length > 0 ? $" 路径={path}" : "")}{(renderErr.Length > 0 ? " 渲染异常:" + renderErr : "")}{initPart}";
         }
     }
 
