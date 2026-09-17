@@ -249,9 +249,9 @@ float4 PSMain(PSInput i) : SV_Target
             var fallbackPx = new byte[4 * 4 * 4];
             for (int i = 0; i < 4 * 4; i++)
             {
-                fallbackPx[i * 4 + 0] = 40;      // B
-                fallbackPx[i * 4 + 1] = 44;      // G
-                fallbackPx[i * 4 + 2] = 52;      // R
+                fallbackPx[i * 4 + 0] = 255;     // B（品红诊断：壁纸未加载时的兜底色）
+                fallbackPx[i * 4 + 1] = 0;       // G
+                fallbackPx[i * 4 + 2] = 255;     // R
                 fallbackPx[i * 4 + 3] = 255;     // A
             }
             var fallbackTex = new Texture2D(_d3d, new Texture2DDescription
@@ -300,7 +300,9 @@ float4 PSMain(PSInput i) : SV_Target
             UpdateVertices(snapX, snapY, cols, rows, cellSize, screenW, screenH, texW, texH);
 
             _ctx.OutputMerger.SetRenderTargets(_rtv);
-            _ctx.ClearRenderTargetView(_rtv, new RawColor4(0.08f, 0.10f, 0.14f, 1f));
+            // 诊断色：亮品红 —— 若桌面显示品红，说明合成层已上屏、清屏生效，
+            // 问题只在壁纸纹理绘制；若桌面仍黑，说明 DComp 视觉未上屏。
+            _ctx.ClearRenderTargetView(_rtv, new RawColor4(1.0f, 0.0f, 1.0f, 1f));
 
             _ctx.InputAssembler.InputLayout = _layout;
             _ctx.InputAssembler.PrimitiveTopology = PrimitiveTopology.TriangleList;
