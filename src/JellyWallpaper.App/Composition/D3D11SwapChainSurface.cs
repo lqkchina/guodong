@@ -311,6 +311,11 @@ float4 PSMain(PSInput i) : SV_Target
         if (_disposed || _swapChain == null) return;
         try
         {
+            // v5.27：网格尺寸（列/行数）可能因参数/边距变化而改变 ——
+            // 索引/顶点缓冲必须随之重建，否则顶点与索引不匹配
+            // → 屏幕斜线/锯齿/越界崩溃（用户实测问题）。
+            EnsureBuffers(cols, rows);
+
             EnsureWallpaperTexture(pixels, texW, texH);
             UpdateVertices(snapX, snapY, cols, rows, cellSize, screenW, screenH, texW, texH,
                            margin, fitMode);
@@ -338,6 +343,47 @@ float4 PSMain(PSInput i) : SV_Target
         {
             _lastError = ex.Message;
         }
+    }
+
+    /// <summary>
+    /// 确保索引/顶点缓冲容量与当前网格尺寸匹配（v5.27）。
+    /// 网格列/行数变化时（扩展边距、网格密度参数被修改）重建两个缓冲：
+    ///   索引缓冲 = IMMUTABLE + 初始数据（D3D11 对不可变缓冲的硬性要求）；
+    ///   顶点缓冲 = Dynamic（容量 = 当前顶点数 × 16 字节）。
+    /// </summary>
+    private void EnsureBuffers(int cols, int rows)
+    {
+        if (cols == _cols && rows == _rows) return;
+
+        _cols = cols;
+        _rows = rows;
+        _vertexCount = cols * rows;
+        _indexCount = (cols - 1) * (rows - 1) * 6;
+
+        // 索引缓冲重建（必须带初始数据，IMMUTABLE）
+        _indexBuffer?.Dispose();
+        _indexData = new int[_indexCount];
+        BuildIndexData();
+        var igch = System.Runtime.InteropServices.GCHandle.Alloc(
+            _indexData, System.Runtime.InteropServices.GCHandleType.Pinned);
+        try
+        {
+            _indexBuffer = new Buffer(_d3d, igch.AddrOfPinnedObject(),
+                new BufferDescription(_indexCount * 4, ResourceUsage.Immutable,
+                    BindFlags.IndexBuffer, CpuAccessFlags.None,
+                    ResourceOptionFlags.None, 0));
+        }
+        finally
+        {
+            igch.Free();
+        }
+
+        // 顶点缓冲重建（Dynamic，容量随顶点数变化）
+        _vertexBuffer?.Dispose();
+        _vertexBuffer = new Buffer(_d3d, new BufferDescription(
+            _vertexCount * 16, ResourceUsage.Dynamic, BindFlags.VertexBuffer,
+            CpuAccessFlags.Write, ResourceOptionFlags.None, 0));
+        _vertexData = new float[_vertexCount * 4];
     }
 
     /// <summary>更新顶点缓冲：物理网格形变位置 → NDC + UV</summary>

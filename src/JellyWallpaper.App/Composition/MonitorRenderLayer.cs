@@ -193,9 +193,12 @@ public sealed class MonitorRenderLayer : IDisposable
         var compositor = _host.Compositor ?? throw new InvalidOperationException("合成器未创建");
 
         // ① D3D11 交换链表面（网格顶点数 = 物理网格同口径）
+        //    v5.27：网格向外扩展 MaxDisplacement 边距（与 SimulationLoop 一致），
+        //    避免屏幕边缘被拖拽时露出黑色清屏底。
         float cell = (float)_config.Physics.GridCellSize;
-        int cols = (int)Math.Ceiling(Bounds.Width / cell) + 1;
-        int rows = (int)Math.Ceiling(Bounds.Height / cell) + 1;
+        float margin = (float)_config.Physics.MaxDisplacement;
+        int cols = (int)Math.Ceiling((Bounds.Width + 2 * margin) / cell) + 1;
+        int rows = (int)Math.Ceiling((Bounds.Height + 2 * margin) / cell) + 1;
         _d3dSurface = new Rendering.D3D11SwapChainSurface();
         _d3dSurface.Initialize(_ownerDevicePtr, Bounds.Width, Bounds.Height, cols, rows);
         if (_d3dSurface.SwapChainPtr == IntPtr.Zero)
