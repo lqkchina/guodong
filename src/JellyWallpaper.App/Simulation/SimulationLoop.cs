@@ -103,8 +103,10 @@ public sealed class SimulationLoop : IDisposable
                 grid.Rebuild();
 
             // 仅当鼠标落在这块屏幕范围内才允许拖拽（多显示器互不干扰）
+            // v5.22 修复：必须"左键按下"才进入拖拽（此前只判断鼠标位置，
+            // 导致鼠标悬停就持续向鼠标位置收缩）
             bool inThisMonitor = layer.Bounds.Contains(mouse.X, mouse.Y);
-            bool dragging = dragAllowed && inThisMonitor;
+            bool dragging = dragAllowed && inThisMonitor && mouse.LeftDown;
 
             // 拖拽坐标转为网格局部坐标（0..w, 0..h）
             grid.SetDrag(mouse.X - layer.Bounds.X, mouse.Y - layer.Bounds.Y, dragging);
