@@ -64,6 +64,10 @@ public sealed class SpringMassGrid
     // ── 鼠标拖拽状态（由 SimulationLoop 每帧更新）─────────────────────
     private bool _dragging;
     private double _mx, _my;
+    // v5.27：拖拽"增量跟随"基准点（上一帧鼠标位置）。
+    // 拖拽时质点随【鼠标位移】移动（而非被"吸引"到鼠标），
+    // 因此按住不动时位移增量为 0 → 弹簧自然回弹 → 不会向鼠标凹陷。
+    private double _lastDragX, _lastDragY;
 
     // ── 渲染双缓冲快照（volatile 引用，跨线程可见性由 volatile 保证）──
     private volatile float[] _snapX = Array.Empty<float>();
@@ -136,9 +140,17 @@ public sealed class SpringMassGrid
     /// <summary>
     /// 设置鼠标拖拽状态。SimulationLoop 在每次物理步进前调用：
     /// 鼠标左键按下且不在图标上 → dragging=true，并给出鼠标坐标。
+    /// v5.27：维护"增量跟随"基准点 —— 松手/刚按下时把基准点同步到
+    /// 当前鼠标位置，保证按下瞬间不产生跳变位移。
     /// </summary>
     public void SetDrag(double mouseX, double mouseY, bool dragging)
     {
+        if (!dragging || !_dragging)
+        {
+            // 未按下 / 刚按下：基准点 = 当前鼠标位置（不产生位移）
+            _lastDragX = mouseX;
+            _lastDragY = mouseY;
+        }
         _dragging = dragging;
         _mx = mouseX;
         _my = mouseY;
@@ -202,10 +214,11 @@ public sealed class SpringMassGrid
     ///    2·√(k·m) 是该弹簧系统的"临界阻尼系数"：
     ///      ζ=1 时系统恰好不震荡地最快回位；0&lt;ζ&lt;1 时欠阻尼产生 Q 弹往复。
     ///
-    /// ④ 拖拽外力（鼠标，仅影响半径 R 内的质点，带平方衰减）
-    ///        F_p = k_drag · (P_mouse − P) · (1 − d/R)² ，k_drag = 2·DragStrength·k
-    ///    其中 d = |P_mouse − P|。距离鼠标越近，跟随越紧；
-    ///    在半径边缘 (d→R) 处力连续衰减到 0，避免网格被"撕开"。
+    /// ④ 拖拽位移（鼠标，仅按下时生效）
+    ///       按住-拖拽时，影响半径 R 内的质点整体随【鼠标位移】平移：
+    ///           ΔP = Δmouse · (1 − d/R)² · DragStrength
+    ///       距离鼠标越近跟随越紧；半径边缘 (d→R) 处衰减到 0，避免网格被"撕开"。
+    ///       按住不动 → Δmouse=0 → 不施加位移 → 弹簧自然回弹（不会凹陷）。
     ///
     /// ⑤ 半隐式欧拉积分
     ///        v ← v + F·dt            （m=1，F 即加速度）
@@ -222,7 +235,6 @@ public sealed class SpringMassGrid
         double k      = _p.Stiffness;
         double anchorK = k * 0.15;
         double c      = _p.Damping * 2.0 * Math.Sqrt(k);   // 阻尼系数 c = ζ·2√(k·m)
-        double kDrag  = 2.0 * _p.DragStrength * k;          // 拖拽外力比例系数
         double radius = _p.DragRadius;
         double maxDisp = _p.MaxDisplacement;
         int cols = Cols;
@@ -264,33 +276,46 @@ public sealed class SpringMassGrid
             // ── 粘性阻尼：F = −c·v ──
             fx[idx] -= c * p.Vx;
             fy[idx] -= c * p.Vy;
+        }
 
-            // ── 拖拽外力（仅按下时生效）──
-            if (_dragging)
+        // ── 拖拽：位移增量跟随（v5.27 优化，独立于力累加循环）─────────
+        //    旧逻辑是"持续吸引"：F = k_drag·(P_mouse−P)·falloff ——
+        //    按住不动时质点被持续拉向鼠标 → 点击位置凹陷（用户反馈"内缩"）。
+        //    新逻辑改为"跟随鼠标位移"：
+        //      鼠标移动 Δ → 半径内质点整体平移 Δ·falloff·DragStrength
+        //      按住不动 → Δ=0 → 不施加位移 → 弹簧/锚点自然回弹
+        //    效果：拖拽时壁纸像被"抓住"跟着走（中心最紧、边缘平方衰减），
+        //    按住时不凹陷、不聚集，线条痕迹更平滑。
+        if (_dragging)
+        {
+            double deltaX = _mx - _lastDragX;
+            double deltaY = _my - _lastDragY;
+            bool moved = Math.Abs(deltaX) > 0.01 || Math.Abs(deltaY) > 0.01;
+            if (moved)
             {
-                double dx = _mx - p.X;
-                double dy = _my - p.Y;
-                double d = Math.Sqrt(dx * dx + dy * dy);
-
-                if (d < radius && d > 0.5)
+                double dragStr = _p.DragStrength;
+                for (int i2 = 0; i2 < count; i2++)
                 {
-                    // 平方衰减系数：(1 − d/R)² ∈ [0,1]
-                    double falloff = 1.0 - d / radius;
-                    falloff *= falloff;
+                    MassPoint q = pts[i2];
+                    double dx = _mx - q.X;
+                    double dy = _my - q.Y;
+                    double d = Math.Sqrt(dx * dx + dy * dy);
 
-                    // F_p = k_drag · (P_mouse − P) · falloff
-                    fx[idx] += kDrag * falloff * dx;
-                    fy[idx] += kDrag * falloff * dy;
-
-                    // 靠近鼠标中心时额外抑制速度，避免质点绕着鼠标抖动
-                    if (d < radius * 0.5)
+                    if (d < radius && d > 0.5)
                     {
-                        p.Vx *= 0.85;
-                        p.Vy *= 0.85;
+                        // 平方衰减：(1 − d/R)² ∈ [0,1]，半径边缘平滑过渡
+                        double falloff = 1.0 - d / radius;
+                        falloff *= falloff;
+
+                        // 质点随鼠标位移平移（中心最强，边缘衰减）
+                        q.X += deltaX * falloff * dragStr;
+                        q.Y += deltaY * falloff * dragStr;
                     }
                 }
             }
         }
+        _lastDragX = _mx;
+        _lastDragY = _my;
 
         // 第二遍：半隐式欧拉积分 + 安全钳制
         for (int idx = 0; idx < count; idx++)

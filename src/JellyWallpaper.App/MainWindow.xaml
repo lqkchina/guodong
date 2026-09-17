@@ -47,7 +47,7 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="网格尺寸" Grid.Column="0"/>
-                <TextBlock x:Name="LblGrid" Grid.Column="1" Text="32 px" Foreground="Gray"/>
+                <TextBlock x:Name="LblGrid" Grid.Column="1" Text="24 px" Foreground="Gray"/>
             </Grid>
             <Slider x:Name="SGrid" Minimum="8" Maximum="64" Style="{StaticResource ParamSlider}"
                     ValueChanged="SGrid_Changed"/>

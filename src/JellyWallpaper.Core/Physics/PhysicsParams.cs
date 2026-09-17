@@ -10,10 +10,10 @@ public sealed class PhysicsParams
     /// <summary>
     /// 网格单元尺寸（像素）。控制网格密度：
     /// 越小网格越密，果冻形变的细节越丰富，但物理计算与 GPU 绘制开销越大。
-    /// 建议范围 16 ~ 64，默认 32（v5.22 参数）。
+    /// 建议范围 16 ~ 64，默认 24（v5.27：加密网格让形变更细腻，消除"线条块痕迹"）。
     /// 修改后需要重建网格（由调用方在 UI 变更时触发 Rebuild）。
     /// </summary>
-    public double GridCellSize { get; set; } = 32.0;
+    public double GridCellSize { get; set; } = 24.0;
 
     /// <summary>
     /// 弹簧刚度 Stiffness（决定回弹力度）。

@@ -90,17 +90,24 @@ public sealed class SimulationLoop : IDisposable
 
         foreach (var layer in layers)
         {
+            // v5.27：网格向外扩展 MaxDisplacement 一圈（margin），
+            // 这样屏幕边缘的质点被拖向屏幕内部时，屏外仍有网格三角形
+            // 覆盖屏幕边缘 → 不再露出黑色清屏底。
+            double margin = _config.Physics.MaxDisplacement;
+            double totalW = layer.Bounds.Width + 2 * margin;
+            double totalH = layer.Bounds.Height + 2 * margin;
+
             // 首次为该屏幕创建物理网格（网格是纯数学对象，物理线程可直接创建）
             var grid = layer.Grid;
-            if (grid == null)
+            if (grid == null
+                || Math.Abs(grid.CellSize - _config.Physics.GridCellSize) > 0.01
+                || Math.Abs(grid.Width - totalW) > 0.01
+                || Math.Abs(grid.Height - totalH) > 0.01)
             {
-                grid = new SpringMassGrid(layer.Bounds.Width, layer.Bounds.Height, _config.Physics);
+                // 网格密度参数 / 扩展边距（MaxDisplacement）变化 → 重建网格
+                grid = new SpringMassGrid(totalW, totalH, _config.Physics);
                 layer.Grid = grid;
             }
-
-            // 网格密度参数变化 → 重建网格（设置面板实时修改立即生效）
-            if (Math.Abs(grid.CellSize - _config.Physics.GridCellSize) > 0.01)
-                grid.Rebuild();
 
             // 仅当鼠标落在这块屏幕范围内才允许拖拽（多显示器互不干扰）
             // v5.22 修复：必须"左键按下"才进入拖拽（此前只判断鼠标位置，
@@ -108,8 +115,9 @@ public sealed class SimulationLoop : IDisposable
             bool inThisMonitor = layer.Bounds.Contains(mouse.X, mouse.Y);
             bool dragging = dragAllowed && inThisMonitor && mouse.LeftDown;
 
-            // 拖拽坐标转为网格局部坐标（0..w, 0..h）
-            grid.SetDrag(mouse.X - layer.Bounds.X, mouse.Y - layer.Bounds.Y, dragging);
+            // 拖拽坐标转为网格局部坐标：屏幕坐标 → 网格原点偏移 +margin
+            grid.SetDrag(mouse.X - layer.Bounds.X + margin,
+                         mouse.Y - layer.Bounds.Y + margin, dragging);
             grid.Step(StepDt);
         }
 
