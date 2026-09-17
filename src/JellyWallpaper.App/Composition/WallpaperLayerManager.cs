@@ -84,7 +84,8 @@ public sealed class WallpaperLayerManager : IDisposable
             string initErr = l.InitError ?? "";
             string path = l.RenderPath;
             string initPart = initErr.Length > 0 ? " 初始化异常:" + initErr : "";
-            return $"FPS={l.RenderFps:F0} 纹理={l.TextureInfo} 壁纸读取={WallpaperSource.LastReadInfo} {_simulation.LastDragInfo} {_host.HostWindowInfo}{(path.Length > 0 ? $" 路径={path}" : "")}{(renderErr.Length > 0 ? " 渲染异常:" + renderErr : "")}{initPart}";
+            string hidePart = _host.NativeWallpaperHidden ? " 原生壁纸=已隐藏" : " 原生壁纸=未隐藏";
+            return $"FPS={l.RenderFps:F0} 纹理={l.TextureInfo} 壁纸读取={WallpaperSource.LastReadInfo} {_simulation.LastDragInfo} {_host.HostWindowInfo}{hidePart}{(path.Length > 0 ? $" 路径={path}" : "")}{(renderErr.Length > 0 ? " 渲染异常:" + renderErr : "")}{initPart}";
         }
     }
 
@@ -180,6 +181,9 @@ public sealed class WallpaperLayerManager : IDisposable
         foreach (var old in _layers)
             old.Dispose();
 
+        // v5.19：隐藏原生壁纸 WorkerW —— 让本程序渲染层成为可见壁纸画面
+        _host.HideNativeWallpaper();
+
         var list = new List<MonitorRenderLayer>(Screen.AllScreens.Length);
         foreach (var screen in Screen.AllScreens)
         {
@@ -200,6 +204,9 @@ public sealed class WallpaperLayerManager : IDisposable
     /// <summary>把壁纸信息逐个推给对应屏幕层（异步加载纹理，不阻塞渲染）</summary>
     private void ApplyWallpaperInfos(IReadOnlyList<WallpaperImageInfo> infos)
     {
+        // 壁纸切换后 WorkerW 可能重建 → 重新隐藏原生壁纸层
+        _host.HideNativeWallpaper();
+
         var layers = _layers;
         for (int i = 0; i < Math.Min(layers.Count, infos.Count); i++)
         {
@@ -258,6 +265,9 @@ public sealed class WallpaperLayerManager : IDisposable
         _explorerWatcher.Dispose();
         _wallpaperWatcher.Dispose();
         _simulation.Dispose();
+
+        // 恢复原生壁纸（把隐藏的 WorkerW 显示回来，程序退出不留后遗症）
+        _host.RestoreNativeWallpaper();
 
         // 合成线程上释放所有 GPU 资源并关闭队列线程
         _queue.TryEnqueue(() =>

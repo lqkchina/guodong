@@ -66,6 +66,75 @@ public sealed class DesktopWallpaperHost
     private bool _initialized;
     private static bool _classRegistered; // 窗口类只需注册一次（进程级）
 
+    /// <summary>原生壁纸层（WorkerW）是否已隐藏（v5.19：根治"被原生壁纸盖住"）</summary>
+    public bool NativeWallpaperHidden { get; private set; }
+
+    /// <summary>
+    /// 恢复原生壁纸（程序退出 / 关闭果冻效果时调用）：
+    /// 把之前隐藏的 WorkerW 全部重新显示。只恢复，不触碰图标层。
+    /// </summary>
+    public void RestoreNativeWallpaper()
+    {
+        try
+        {
+            if (!NativeWallpaperHidden) return;
+            IntPtr desktop = NativeMethods.GetDesktopWindow();
+            IntPtr worker = IntPtr.Zero;
+            do
+            {
+                worker = NativeMethods.FindWindowEx(desktop, worker, "WorkerW", null);
+                if (worker == IntPtr.Zero) break;
+                if (NativeMethods.FindWindowEx(worker, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
+                    continue; // 图标层不动
+                if (!NativeMethods.IsWindowVisible(worker))
+                    NativeMethods.ShowWindow(worker, 5); // SW_SHOW
+            } while (worker != IntPtr.Zero);
+            NativeWallpaperHidden = false;
+        }
+        catch
+        {
+            // 恢复失败：最坏情况是原生壁纸保持隐藏，程序下次启动 BuildLayers 会重新隐藏/管理
+        }
+    }
+
+    /// <summary>
+    /// 隐藏承载原生壁纸的 WorkerW，让本程序的渲染层（内容=系统壁纸本身）
+    /// 成为桌面上唯一可见的壁纸画面。
+    /// 只隐藏"不含桌面图标(SHELLDLL_DefView)"的 WorkerW —— 图标层绝不触碰。
+    /// explorer 重启 / 壁纸切换后 WorkerW 会重建，需再次调用（见 WallpaperLayerManager）。
+    /// </summary>
+    public void HideNativeWallpaper()
+    {
+        try
+        {
+            IntPtr desktop = NativeMethods.GetDesktopWindow();
+            IntPtr worker = IntPtr.Zero;
+            bool hiddenAny = false;
+            do
+            {
+                worker = NativeMethods.FindWindowEx(desktop, worker, "WorkerW", null);
+                if (worker == IntPtr.Zero) break;
+
+                // 含桌面图标的 WorkerW 不能动；只隐藏纯壁纸 WorkerW
+                if (NativeMethods.FindWindowEx(worker, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
+                    continue;
+
+                if (NativeMethods.IsWindowVisible(worker))
+                {
+                    NativeMethods.ShowWindow(worker, 0); // SW_HIDE
+                    hiddenAny = true;
+                }
+            } while (worker != IntPtr.Zero);
+
+            NativeWallpaperHidden = hiddenAny;
+        }
+        catch
+        {
+            // 隐藏失败不影响主流程（最坏情况 = 原生壁纸盖住，与 v5.18 行为一致）
+            NativeWallpaperHidden = false;
+        }
+    }
+
     /// <summary>是否已成功挂载到桌面</summary>
     public bool IsInitialized => _initialized;
 

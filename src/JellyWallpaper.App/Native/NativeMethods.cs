@@ -23,6 +23,19 @@ internal static class NativeMethods
     public static extern IntPtr FindWindowEx(IntPtr hWndParent, IntPtr hWndChildAfter,
                                              string lpszClass, string? lpszWindow);
 
+    /// <summary>桌面根窗口（枚举 WorkerW 用）</summary>
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDesktopWindow();
+
+    /// <summary>显示/隐藏窗口（SW_HIDE=0 / SW_SHOW=5）</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
@@ -174,8 +187,4 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool DestroyWindow(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
 }
