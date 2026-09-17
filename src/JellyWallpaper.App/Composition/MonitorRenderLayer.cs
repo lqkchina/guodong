@@ -103,37 +103,6 @@ public sealed class MonitorRenderLayer : IDisposable
     /// <summary>最近一次壁纸解码失败原因（后台线程写，诊断用）</summary>
     public volatile string? DecodeError;
 
-    /// <summary>
-    /// 系统壁纸放置模式（v5.23：按注册表 WallpaperStyle 映射 UV，
-    /// 解决大图被 1:1 裁剪显示不全的问题）。
-    ///   0=居中  1=平铺(按拉伸简化)  2=拉伸  6=适应(完整可见)  10=填充(默认)  22=跨区(按填充)
-    /// 只读一次并缓存；用户改系统壁纸设置后重启软件生效。
-    /// </summary>
-    public static int WallpaperFitMode { get; private set; } = 10;
-
-    static MonitorRenderLayer()
-    {
-        try
-        {
-            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop");
-            if (key != null)
-            {
-                object? style = key.GetValue("WallpaperStyle");
-                object? tile = key.GetValue("TileWallpaper");
-                int s = style is string ss && int.TryParse(ss, out var v) ? v : 10;
-                bool isTile = tile is string ts && ts == "1";
-                if (isTile) s = 1;              // 平铺优先
-                if (s != 0 && s != 1 && s != 2 && s != 6 && s != 10 && s != 22) s = 10;
-                if (s == 22) s = 10;            // 跨区：每屏缓存已是该屏图像 → 按填充
-                WallpaperFitMode = s;
-            }
-        }
-        catch
-        {
-            WallpaperFitMode = 10; // 读注册表失败 → 默认填充（Cover）
-        }
-    }
-
     public MonitorRenderLayer(DesktopWallpaperHost host, AppConfig config,
                               DispatcherQueue queue, Rectangle bounds, float dpi, IntPtr ownerDevicePtr)
     {
@@ -341,10 +310,7 @@ public sealed class MonitorRenderLayer : IDisposable
             if (px != null) { _wallpaperW = tw; _wallpaperH = th; }
 
             // ③ 渲染到交换链（内部：顶点更新 → 纹理 → 绘制 → Present）
-            //    v5.23：按系统壁纸放置模式（填充/拉伸/居中）映射 UV，
-            //    大图不再 1:1 裁剪显示
-            _d3dSurface.Render(sx, sy, cols, rows, cell, px, tw, th,
-                Bounds.Width, Bounds.Height, WallpaperFitMode);
+            _d3dSurface.Render(sx, sy, cols, rows, cell, px, tw, th, Bounds.Width, Bounds.Height);
             _renderPath = "SwapChain";
             LastRenderError = _d3dSurface.LastError.Length > 0 ? "渲染失败 " + _d3dSurface.LastError : null;
         }
