@@ -208,18 +208,30 @@ float4 PSMain(PSInput i) : SV_Target
             throw new InvalidOperationException("Shader 编译/创建失败 " + ex.Message, ex);
         }
 
-        // ── ③ 顶点缓冲（Dynamic，每帧更新形变位置）＋ 索引缓冲 ──────
-        //    注意：D3D11 规定 IMMUTABLE（不可变）缓冲创建时必须带初始数据，
-        //    否则返回 E_INVALIDARG —— 索引缓冲因此用 DEFAULT（创建后 UpdateSubresource 上传）。
+        // ── ③ 顶点缓冲（Dynamic，每帧 Map 更新形变位置）＋ 索引缓冲 ──────
+        //    D3D11 正统用法（v5.21 改为标准模式，消除驱动兼容问题）：
+        //    · 索引缓冲 = IMMUTABLE + 创建时带初始数据（不可变缓冲必须如此）
+        //    · 顶点缓冲 = DYNAMIC + Map(WriteDiscard) 每帧更新（见 UpdateVertices）
         try
         {
+            _indexData = new int[_indexCount];
+            BuildIndexData(); // 先填好索引数据
+            var igch = System.Runtime.InteropServices.GCHandle.Alloc(
+                _indexData, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                _indexBuffer = new Buffer(_d3d, igch.AddrOfPinnedObject(),
+                    new BufferDescription(_indexCount * 4, ResourceUsage.Immutable,
+                        BindFlags.IndexBuffer, CpuAccessFlags.None,
+                        ResourceOptionFlags.None, 0));
+            }
+            finally
+            {
+                igch.Free();
+            }
             _vertexBuffer = new Buffer(_d3d, new BufferDescription(
                 _vertexCount * 16, ResourceUsage.Dynamic, BindFlags.VertexBuffer,
                 CpuAccessFlags.Write, ResourceOptionFlags.None, 0));
-            _indexBuffer = new Buffer(_d3d, new BufferDescription(
-                _indexCount * 4, ResourceUsage.Default, BindFlags.IndexBuffer,
-                CpuAccessFlags.None, ResourceOptionFlags.None, 0));
-            BuildIndexData();
         }
         catch (Exception ex)
         {
@@ -249,9 +261,9 @@ float4 PSMain(PSInput i) : SV_Target
             var fallbackPx = new byte[4 * 4 * 4];
             for (int i = 0; i < 4 * 4; i++)
             {
-                fallbackPx[i * 4 + 0] = 255;     // B（品红诊断：壁纸未加载时的兜底色）
-                fallbackPx[i * 4 + 1] = 0;       // G
-                fallbackPx[i * 4 + 2] = 255;     // R
+                fallbackPx[i * 4 + 0] = 0;       // B（亮绿诊断：壁纸纹理未参与绘制时显示）
+                fallbackPx[i * 4 + 1] = 255;     // G
+                fallbackPx[i * 4 + 2] = 0;       // R
                 fallbackPx[i * 4 + 3] = 255;     // A
             }
             var fallbackTex = new Texture2D(_d3d, new Texture2DDescription
@@ -350,7 +362,27 @@ float4 PSMain(PSInput i) : SV_Target
                 _vertexData[vi + 3] = r * cellSize / texHf;
             }
         }
-        Upload(_vertexBuffer, _vertexData, vc * 16);    }
+        // Dynamic 缓冲正统更新：Map(WriteDiscard) + 拷贝（避免驱动对
+        // Dynamic+UpdateSubresource 组合的兼容问题，v5.21）
+        var box = _ctx.MapSubresource(_vertexBuffer, 0, MapMode.WriteDiscard, SharpDX.Direct3D11.MapFlags.None);
+        try
+        {
+            var gch = System.Runtime.InteropServices.GCHandle.Alloc(
+                _vertexData, System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                SharpDX.Utilities.CopyMemory(box.DataPointer, gch.AddrOfPinnedObject(), vc * 16);
+            }
+            finally
+            {
+                gch.Free();
+            }
+        }
+        finally
+        {
+            _ctx.UnmapSubresource(_vertexBuffer, 0);
+        }
+    }
 
     /// <summary>壁纸纹理：像素引用变化时才重建（BGRA8 → Texture2D → SRV）</summary>
     private void EnsureWallpaperTexture(byte[]? pixels, int w, int h)
@@ -392,7 +424,6 @@ float4 PSMain(PSInput i) : SV_Target
     /// <summary>构建三角形索引（网格单元 → 2 三角形），一次性上传</summary>
     private void BuildIndexData()
     {
-        _indexData = new int[_indexCount];
         int k = 0;
         for (int r = 0; r < _rows - 1; r++)
         {
@@ -406,7 +437,7 @@ float4 PSMain(PSInput i) : SV_Target
                 _indexData[k++] = i1; _indexData[k++] = i3; _indexData[k++] = i2;
             }
         }
-        Upload(_indexBuffer, _indexData, _indexCount * 4);
+        // 索引数据在 Initialize 创建 IMMUTABLE 缓冲时已随初始数据上传，无需再次上传
     }
 
     /// <summary>托管数组 → GPU 缓冲（pin 后 UpdateSubresource）</summary>
