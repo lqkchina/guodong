@@ -13,6 +13,12 @@ namespace JellyWallpaper.Core.Config;
 /// </summary>
 public sealed class AppConfig
 {
+    /// <summary>
+    /// 配置版本。参数预设更新时 +1；旧版本配置在 Load() 时自动升级，
+    /// 物理参数重置为新的默认值（防止用户被旧版"手感过时"的参数卡住）。
+    /// </summary>
+    public int ConfigVersion { get; set; } = 2;
+
     /// <summary>物理引擎参数（滑块实时修改，立即生效）</summary>
     public PhysicsParams Physics { get; set; } = new();
 
@@ -49,7 +55,18 @@ public sealed class AppConfig
             {
                 string json = File.ReadAllText(ConfigPath);
                 var cfg = JsonSerializer.Deserialize<AppConfig>(json, JsonOpts);
-                if (cfg != null) return cfg;
+                if (cfg != null)
+                {
+                    // v5.24：旧版配置（ConfigVersion<2）自动升级 —— 物理参数
+                    // 重置为新的 Q 弹默认值，避免被旧版"手感过时"的参数覆盖。
+                    if (cfg.ConfigVersion < 2)
+                    {
+                        cfg.ConfigVersion = 2;
+                        cfg.Physics = new PhysicsParams();
+                        cfg.Save();
+                    }
+                    return cfg;
+                }
             }
         }
         catch
