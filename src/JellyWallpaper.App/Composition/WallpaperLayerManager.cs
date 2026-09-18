@@ -88,7 +88,8 @@ public sealed class WallpaperLayerManager : IDisposable
             string path = l.RenderPath;
             string initPart = initErr.Length > 0 ? " 初始化异常:" + initErr : "";
             string hidePart = _host.NativeWallpaperHidden ? " 原生壁纸=已隐藏" : " 原生壁纸=未隐藏";
-            return $"FPS={l.RenderFps:F0} 纹理={l.TextureInfo} 壁纸读取={WallpaperSource.LastReadInfo} {_simulation.LastDragInfo} {_host.HostWindowInfo}{hidePart}{(path.Length > 0 ? $" 路径={path}" : "")}{(renderErr.Length > 0 ? " 渲染异常:" + renderErr : "")}{initPart} v5.30";
+            string hideInfo = " " + _host.LastHideInfo;
+            return $"FPS={l.RenderFps:F0} 纹理={l.TextureInfo} 壁纸读取={WallpaperSource.LastReadInfo} {_simulation.LastDragInfo} {_host.HostWindowInfo}{hidePart}{hideInfo}{(path.Length > 0 ? $" 路径={path}" : "")}{(renderErr.Length > 0 ? " 渲染异常:" + renderErr : "")}{initPart} v5.31";
         }
     }
 
