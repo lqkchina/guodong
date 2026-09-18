@@ -64,10 +64,14 @@ public sealed class SpringMassGrid
     // ── 鼠标拖拽状态（由 SimulationLoop 每帧更新）─────────────────────
     private bool _dragging;
     private double _mx, _my;
-    // v5.27：拖拽"增量跟随"基准点（上一帧鼠标位置）。
-    // 拖拽时质点随【鼠标位移】移动（而非被"吸引"到鼠标），
-    // 因此按住不动时位移增量为 0 → 弹簧自然回弹 → 不会向鼠标凹陷。
+    // v5.29：拖拽"目标跟随"状态。
+    // 拖拽时记录鼠标累计位移（_accumX/_accumY，自按下起）；
+    // 质点目标位置 = 原始坐标 + 累计位移 → 用弹簧力拉向目标：
+    //   拖拽 → 累计位移增大 → 目标移动 → 壁纸跟随鼠标（位移能累积，不再是每帧几像素的微小增量）
+    //   按住不动 → 累计位移不变 → 目标固定 → 保持当前形变，不向鼠标凹陷
+    //   松手 → 无目标力 → 弹簧/锚点回弹
     private double _lastDragX, _lastDragY;
+    private double _accumX, _accumY;
 
     // ── 渲染双缓冲快照（volatile 引用，跨线程可见性由 volatile 保证）──
     private volatile float[] _snapX = Array.Empty<float>();
@@ -140,14 +144,24 @@ public sealed class SpringMassGrid
     /// <summary>
     /// 设置鼠标拖拽状态。SimulationLoop 在每次物理步进前调用：
     /// 鼠标左键按下且不在图标上 → dragging=true，并给出鼠标坐标。
-    /// v5.27：维护"增量跟随"基准点 —— 松手/刚按下时把基准点同步到
-    /// 当前鼠标位置，保证按下瞬间不产生跳变位移。
+    /// v5.29：维护"目标跟随"的累计位移 —— 拖拽中每帧累加鼠标位移，
+    /// 松手/刚按下时把累计位移清零并重置基准点（不产生跳变）。
     /// </summary>
     public void SetDrag(double mouseX, double mouseY, bool dragging)
     {
         if (!dragging || !_dragging)
         {
-            // 未按下 / 刚按下：基准点 = 当前鼠标位置（不产生位移）
+            // 未按下 / 刚按下：重置累计位移与基准点（按下瞬间不产生位移）
+            _accumX = 0;
+            _accumY = 0;
+            _lastDragX = mouseX;
+            _lastDragY = mouseY;
+        }
+        else
+        {
+            // 拖拽中：累加鼠标位移
+            _accumX += mouseX - _lastDragX;
+            _accumY += mouseY - _lastDragY;
             _lastDragX = mouseX;
             _lastDragY = mouseY;
         }
@@ -278,22 +292,21 @@ public sealed class SpringMassGrid
             fy[idx] -= c * p.Vy;
         }
 
-        // ── 拖拽：位移增量跟随（v5.27 优化，独立于力累加循环）─────────
-        //    旧逻辑是"持续吸引"：F = k_drag·(P_mouse−P)·falloff ——
-        //    按住不动时质点被持续拉向鼠标 → 点击位置凹陷（用户反馈"内缩"）。
-        //    新逻辑改为"跟随鼠标位移"：
-        //      鼠标移动 Δ → 半径内质点整体平移 Δ·falloff·DragStrength
-        //      按住不动 → Δ=0 → 不施加位移 → 弹簧/锚点自然回弹
-        //    效果：拖拽时壁纸像被"抓住"跟着走（中心最紧、边缘平方衰减），
-        //    按住时不凹陷、不聚集，线条痕迹更平滑。
+        // ── 拖拽：目标跟随（v5.29，独立于力累加循环）───────────────────
+        //    演化：v5.22"持续吸引到鼠标" → 按住凹陷；v5.27"每帧位移增量"
+        //    → 位移累积不起来（用户实测失效，位移仅 1.8px）。
+        //    正确做法：质点目标 = 原始坐标 + 鼠标累计位移（_accumX/Y），
+        //    用弹簧力 F = k_drag·falloff·(target − P) 拉向目标：
+        //      · 拖拽 → 累计位移增大 → 目标移动 → 壁纸大幅跟随（位移可累积）
+        //      · 按住不动 → 累计位移不变 → 目标固定 → 保持形变，不凹陷
+        //      · 松手 → 无目标力 → 弹簧/锚点回弹（Q 弹）
+        //    k_drag = 2·DragStrength·k，与 v5.22 同强度口径。
         if (_dragging)
         {
-            double deltaX = _mx - _lastDragX;
-            double deltaY = _my - _lastDragY;
-            bool moved = Math.Abs(deltaX) > 0.01 || Math.Abs(deltaY) > 0.01;
-            if (moved)
+            double kDrag = 2.0 * _p.DragStrength * k;
+            double accX = _accumX, accY = _accumY;
+            if (accX != 0 || accY != 0)
             {
-                double dragStr = _p.DragStrength;
                 for (int i2 = 0; i2 < count; i2++)
                 {
                     MassPoint q = pts[i2];
@@ -307,15 +320,17 @@ public sealed class SpringMassGrid
                         double falloff = 1.0 - d / radius;
                         falloff *= falloff;
 
-                        // 质点随鼠标位移平移（中心最强，边缘衰减）
-                        q.X += deltaX * falloff * dragStr;
-                        q.Y += deltaY * falloff * dragStr;
+                        // 目标 = 原始坐标 + 累计鼠标位移
+                        double tx = q.RestX + accX;
+                        double ty = q.RestY + accY;
+
+                        // 目标弹簧力：把质点拉向"原始+累计位移"处
+                        fx[i2] += kDrag * falloff * (tx - q.X);
+                        fy[i2] += kDrag * falloff * (ty - q.Y);
                     }
                 }
             }
         }
-        _lastDragX = _mx;
-        _lastDragY = _my;
 
         // 第二遍：半隐式欧拉积分 + 安全钳制
         for (int idx = 0; idx < count; idx++)
