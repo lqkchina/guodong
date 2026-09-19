@@ -224,7 +224,7 @@ public sealed class SpringMassGrid
         double k      = _p.Stiffness;
         double anchorK = k * 0.15;
         double c      = _p.Damping * 2.0 * Math.Sqrt(k);   // 阻尼系数 c = ζ·2√(k·m)
-        double kDrag  = 2.0 * _p.DragStrength * k;          // 拖拽外力比例系数
+        double kDrag  = 8.0 * _p.DragStrength * k;          // v5.45：2→8 倍，按压更贴近目标深度（默认参数下形变肉眼可见）
         double radius = _p.DragRadius;
         double maxDisp = _p.MaxDisplacement;
         int cols = Cols;
@@ -280,8 +280,8 @@ public sealed class SpringMassGrid
         //    sink/bulge 都是连续平滑函数 → 形变圆润、无线条块。
         if (_dragging)
         {
-            // 深度 = 最大位移的 35%（默认 160 → 凹陷约 56px，浅而圆润）
-            double A = _p.MaxDisplacement * 0.35;
+            // 深度 = 最大位移的 55%（默认 160 → 凹陷目标 88px，按压明显；防翻转钳制仍限制不穿透）
+            double A = _p.MaxDisplacement * 0.55;
             double B = A * 0.4;
 
             for (int i2 = 0; i2 < count; i2++)
