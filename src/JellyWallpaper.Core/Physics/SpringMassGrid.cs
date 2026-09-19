@@ -61,17 +61,10 @@ public sealed class SpringMassGrid
     /// <summary>共享的可调参数对象（UI 修改立即生效）</summary>
     private readonly PhysicsParams _p;
 
-    // ── 鼠标拖拽状态（由 SimulationLoop 每帧更新）─────────────────────
-    private bool _dragging;
+    // ── 鼠标碰触/拖拽状态（由 SimulationLoop 每帧更新）────────────────
+    private bool _touching;   // 碰触：鼠标在空白区域（不按键也触发凹陷波动）
+    private bool _dragging;   // 拖拽：左键按下（吸引增强）
     private double _mx, _my;
-    // v5.29：拖拽"目标跟随"状态。
-    // 拖拽时记录鼠标累计位移（_accumX/_accumY，自按下起）；
-    // 质点目标位置 = 原始坐标 + 累计位移 → 用弹簧力拉向目标：
-    //   拖拽 → 累计位移增大 → 目标移动 → 壁纸跟随鼠标（位移能累积，不再是每帧几像素的微小增量）
-    //   按住不动 → 累计位移不变 → 目标固定 → 保持当前形变，不向鼠标凹陷
-    //   松手 → 无目标力 → 弹簧/锚点回弹
-    private double _lastDragX, _lastDragY;
-    private double _accumX, _accumY;
 
     // ── 渲染双缓冲快照（volatile 引用，跨线程可见性由 volatile 保证）──
     private volatile float[] _snapX = Array.Empty<float>();
@@ -142,29 +135,13 @@ public sealed class SpringMassGrid
     public MassPoint GetPoint(int index) => _points[index];
 
     /// <summary>
-    /// 设置鼠标拖拽状态。SimulationLoop 在每次物理步进前调用：
-    /// 鼠标左键按下且不在图标上 → dragging=true，并给出鼠标坐标。
-    /// v5.29：维护"目标跟随"的累计位移 —— 拖拽中每帧累加鼠标位移，
-    /// 松手/刚按下时把累计位移清零并重置基准点（不产生跳变）。
+    /// 设置鼠标碰触/拖拽状态。SimulationLoop 在每次物理步进前调用：
+    ///   touching = 鼠标在桌面空白区域（不按键，碰触即触发局部凹陷波动）
+    ///   dragging = 左键按下（吸引增强，拖拽跟随）
     /// </summary>
-    public void SetDrag(double mouseX, double mouseY, bool dragging)
+    public void SetDrag(double mouseX, double mouseY, bool touching, bool dragging)
     {
-        if (!dragging || !_dragging)
-        {
-            // 未按下 / 刚按下：重置累计位移与基准点（按下瞬间不产生位移）
-            _accumX = 0;
-            _accumY = 0;
-            _lastDragX = mouseX;
-            _lastDragY = mouseY;
-        }
-        else
-        {
-            // 拖拽中：累加鼠标位移
-            _accumX += mouseX - _lastDragX;
-            _accumY += mouseY - _lastDragY;
-            _lastDragX = mouseX;
-            _lastDragY = mouseY;
-        }
+        _touching = touching;
         _dragging = dragging;
         _mx = mouseX;
         _my = mouseY;
@@ -249,6 +226,7 @@ public sealed class SpringMassGrid
         double k      = _p.Stiffness;
         double anchorK = k * 0.15;
         double c      = _p.Damping * 2.0 * Math.Sqrt(k);   // 阻尼系数 c = ζ·2√(k·m)
+        double kDrag  = 2.0 * _p.DragStrength * k;          // 拖拽外力比例系数
         double radius = _p.DragRadius;
         double maxDisp = _p.MaxDisplacement;
         int cols = Cols;
@@ -290,43 +268,51 @@ public sealed class SpringMassGrid
             // ── 粘性阻尼：F = −c·v ──
             fx[idx] -= c * p.Vx;
             fy[idx] -= c * p.Vy;
-        }
 
-        // ── 拖拽：目标跟随（v5.29，独立于力累加循环）───────────────────
-        //    演化：v5.22"持续吸引到鼠标" → 按住凹陷；v5.27"每帧位移增量"
-        //    → 位移累积不起来（用户实测失效，位移仅 1.8px）。
-        //    正确做法：质点目标 = 原始坐标 + 鼠标累计位移（_accumX/Y），
-        //    用弹簧力 F = k_drag·falloff·(target − P) 拉向目标：
-        //      · 拖拽 → 累计位移增大 → 目标移动 → 壁纸大幅跟随（位移可累积）
-        //      · 按住不动 → 累计位移不变 → 目标固定 → 保持形变，不凹陷
-        //      · 松手 → 无目标力 → 弹簧/锚点回弹（Q 弹）
-        //    k_drag = 2·DragStrength·k，与 v5.22 同强度口径。
-        if (_dragging)
-        {
-            double kDrag = 2.0 * _p.DragStrength * k;
-            double accX = _accumX, accY = _accumY;
-            if (accX != 0 || accY != 0)
+            // ── 拖拽外力（v5.34：真实果冻按压位移场）────────────────────
+            //    玩果冻的按压感 = 按下去中心圆润凹陷 + 四周微微鼓起 + 平滑过渡，
+            //    不是"整块布被拽向鼠标"的线条收缩。
+            //    位移场设计（沿径向，指向/背离按压中心）：
+            //      凹陷（向内）: sink(t) = A·(1−t)²，t=r/R —— 中心最深、边缘平滑归零
+            //      隆起（向外）: bulge(t) = B·sin(π·(t−0.45)/0.55)，t∈[0.45,1]
+            //                   —— 按压把果冻肉挤向四周，环带微微鼓起
+            //      A ≈ MaxDisplacement·0.45（按住 0.75，更深）；B ≈ A·0.35
+            //    目标 = 原始坐标 + 径向位移(−sink+bulge)·向外单位向量；
+            //    弹簧力 F = k_active·(target − P) 松弛到目标 → 松开后无外力回弹。
+            //    sink/bulge 都是连续平滑函数 → 网格无硬边、无线条块。
+            if (_touching)
             {
+                double A = _p.MaxDisplacement * (_dragging ? 0.75 : 0.45);
+                double B = A * 0.35;
+                double kActive = _dragging ? kDrag : kDrag * 0.6;
+
                 for (int i2 = 0; i2 < count; i2++)
                 {
                     MassPoint q = pts[i2];
-                    double dx = _mx - q.X;
-                    double dy = _my - q.Y;
-                    double d = Math.Sqrt(dx * dx + dy * dy);
+                    double dx = q.X - _mx;   // 从按压中心指向质点的向量（向外）
+                    double dy = q.Y - _my;
+                    double r = Math.Sqrt(dx * dx + dy * dy);
 
-                    if (d < radius && d > 0.5)
+                    if (r < radius && r > 0.5)
                     {
-                        // 平方衰减：(1 − d/R)² ∈ [0,1]，半径边缘平滑过渡
-                        double falloff = 1.0 - d / radius;
-                        falloff *= falloff;
+                        double t = r / radius;
+                        // 中心平滑凹陷（二次衰减）
+                        double sink = A * (1.0 - t) * (1.0 - t);
+                        // 环带隆起（正弦鼓包，0.45R~R 之间）
+                        double bulge = 0.0;
+                        if (t > 0.45)
+                            bulge = B * Math.Sin(Math.PI * (t - 0.45) / 0.55);
 
-                        // 目标 = 原始坐标 + 累计鼠标位移
-                        double tx = q.RestX + accX;
-                        double ty = q.RestY + accY;
+                        double radial = sink - bulge;               // 内缩为正
+                        double nx = dx / r, ny = dy / r;            // 径向向外单位向量
 
-                        // 目标弹簧力：把质点拉向"原始+累计位移"处
-                        fx[i2] += kDrag * falloff * (tx - q.X);
-                        fy[i2] += kDrag * falloff * (ty - q.Y);
+                        // 目标 = 原始坐标 + 径向位移（内缩 sink / 外鼓 bulge）
+                        double tx = q.RestX - nx * radial;
+                        double ty = q.RestY - ny * radial;
+
+                        // 弹簧力把质点松弛到目标位置（保持 Q 弹回弹）
+                        fx[i2] += kActive * (tx - q.X);
+                        fy[i2] += kActive * (ty - q.Y);
                     }
                 }
             }

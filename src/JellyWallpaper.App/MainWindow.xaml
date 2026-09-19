@@ -1,7 +1,7 @@
 <Window x:Class="JellyWallpaper.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="果冻弹性壁纸 · 设置 v5.31"
+        Title="果冻弹性壁纸 · 设置 v5.34"
         Width="470" Height="700" ResizeMode="NoResize">
 
     <Window.Resources>
@@ -23,7 +23,7 @@
         <StackPanel Grid.Row="0">
             <TextBlock Text="果冻弹性壁纸" FontSize="20" FontWeight="Bold"/>
             <TextBlock x:Name="TxtStatus" Text="合成层状态：初始化中…" Foreground="Gray" Margin="0,4,0,0"/>
-            <TextBlock Text="提示：在桌面空白处按住左键拖拽壁纸即可看到果冻形变，松开自动回弹" 
+            <TextBlock Text="提示：鼠标划过桌面空白处壁纸即随你波动（果冻手感），按住左键拖拽跟随更强，松开自动回弹" 
                        Foreground="DimGray" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap"/>
         </StackPanel>
 

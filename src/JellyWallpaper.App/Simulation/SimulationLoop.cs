@@ -109,15 +109,18 @@ public sealed class SimulationLoop : IDisposable
                 layer.Grid = grid;
             }
 
-            // 仅当鼠标落在这块屏幕范围内才允许拖拽（多显示器互不干扰）
-            // v5.22 修复：必须"左键按下"才进入拖拽（此前只判断鼠标位置，
-            // 导致鼠标悬停就持续向鼠标位置收缩）
+            // v5.33：碰触式触发 —— 玩果冻的手感：
+            //   · 鼠标【悬停/划过】桌面空白区域（不按键）→ 局部凹陷波动（温和吸引）
+            //   · 按住左键拖拽 → 吸引增强，跟随更紧
+            //   · 松开 → 弹簧回弹（Q 弹）
+            // 之前"必须按住左键拖拽才触发"导致点击/划过毫无反应（用户反馈"没效果"）。
             bool inThisMonitor = layer.Bounds.Contains(mouse.X, mouse.Y);
-            bool dragging = dragAllowed && inThisMonitor && mouse.LeftDown;
+            bool touching = dragAllowed && inThisMonitor;                 // 碰触（不按键也触发）
+            bool dragging = dragAllowed && inThisMonitor && mouse.LeftDown; // 按住拖拽（增强）
 
             // 拖拽坐标转为网格局部坐标：屏幕坐标 → 网格原点偏移 +margin
             grid.SetDrag(mouse.X - layer.Bounds.X + margin,
-                         mouse.Y - layer.Bounds.Y + margin, dragging);
+                         mouse.Y - layer.Bounds.Y + margin, touching, dragging);
             grid.Step(StepDt);
         }
 
