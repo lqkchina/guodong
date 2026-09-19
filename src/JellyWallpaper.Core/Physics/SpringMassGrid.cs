@@ -18,6 +18,8 @@ namespace JellyWallpaper.Core.Physics;
 ///   ③ 粘性阻尼 —— 正比于速度、方向相反的耗散力，让震荡逐渐停止；
 ///   ④ 拖拽外力 —— 鼠标按下时，按压位移场驱动局部凹陷+四周鼓起
 ///      （真实果冻按压感，见 Step() 内 sink/bulge 公式）。
+///   ⑤ 黏弹性"肉记忆"（v5.42）—— 慢速锚点 + 渐进按压深度，
+///      模拟真人皮肤"duang 一下 + 慢慢收回"的黏弹性回弹手感。
 ///
 /// ── 时间积分 ─────────────────────────────────────────────────────────
 /// 使用"半隐式欧拉法"（semi-implicit Euler，又称 symplectic Euler）：
@@ -65,6 +67,29 @@ public sealed class SpringMassGrid
     // ── 鼠标拖拽状态（由 SimulationLoop 每帧更新）─────────────────────
     private bool _dragging;   // 拖拽：左键按下
     private double _mx, _my;
+
+    // ── 皮肤手感状态（v5.42：黏弹性模拟）───────────────────────────────
+    //  _effMx/_effMy —— 平滑后的"有效按压中心"：拖拽时形变区被手指
+    //                   黏着走、略有延迟（皮肤被拨动的滞后感）。
+    //  _pressDepth    —— 按压深度 0→1：按下后渐进下陷（约 100ms 压到底），
+    //                   松开后渐进抬升（约 80ms），配合弹簧回弹更接近真人。
+    private double _effMx, _effMy;
+    private double _pressDepth;
+
+    // 皮肤黏弹性常量（v5.42）：
+    //   kSlow        慢速锚点刚度：约等于快速锚点(0.15k)的 45% → 松开瞬间
+    //                快速弹回约 70%，剩余约 30% 由"肉记忆"缓慢复位
+    //   SlowFollow   拖拽时肉记忆跟随形变的速率（每步比例，≈50 步跟到 63%）
+    //   SlowRestoreT 松开后肉记忆指数恢复到原始坐标的时间常数（秒）→ 肉感
+    //   PressT       按压下陷时间常数（秒）
+    //   ReleaseT     松开抬升时间常数（秒）
+    //   EffMouseT    有效按压中心平滑时间常数（秒）→ 拖拽黏手感
+    private const double kSlow = 8.0;
+    private const double SlowFollow = 0.02;
+    private const double SlowRestoreT = 0.45;
+    private const double PressT = 0.10;
+    private const double ReleaseT = 0.08;
+    private const double EffMouseT = 0.06;
 
     // ── 渲染双缓冲快照（volatile 引用，跨线程可见性由 volatile 保证）──
     private volatile float[] _snapX = Array.Empty<float>();
@@ -153,6 +178,8 @@ public sealed class SpringMassGrid
     {
         for (int i = 0; i < _points.Length; i++)
             _points[i].Reset();
+        _pressDepth = 0;      // 复位按压深度（避免残留凹陷）
+        _effMx = _effMy = 0;
         PublishSnapshot();
     }
 
@@ -221,6 +248,20 @@ public sealed class SpringMassGrid
     {
         if (dt <= 0) return;
 
+        // ── 皮肤手感状态更新（v5.42）────────────────────────────────────
+        //  ① 有效按压中心平滑：形变中心缓慢追着鼠标走 → 拖拽"黏手"感
+        //  ② 按压深度渐进：按下 100ms 逐渐压到底（不是瞬间到位），
+        //     松开 80ms 逐渐抬升，配合弹簧回弹形成"肉感"下陷/复位
+        double ema = dt / EffMouseT;
+        if (ema > 1) ema = 1;
+        _effMx += (_mx - _effMx) * ema;
+        _effMy += (_my - _effMy) * ema;
+
+        double depthTarget = _dragging ? 1.0 : 0.0;
+        double dma = _dragging ? dt / PressT : dt / ReleaseT;
+        if (dma > 1) dma = 1;
+        _pressDepth += (depthTarget - _pressDepth) * dma;
+
         double k      = _p.Stiffness;
         double anchorK = k * 0.15;
         double c      = _p.Damping * 2.0 * Math.Sqrt(k);   // 阻尼系数 c = ζ·2√(k·m)
@@ -263,41 +304,41 @@ public sealed class SpringMassGrid
             fx[idx] += anchorK * (p.RestX - p.X);
             fy[idx] += anchorK * (p.RestY - p.Y);
 
+            // ── 慢速锚点力（v5.42 黏弹性"肉记忆"）：F = kSlow·(Slow − P) ──
+            //    Slow 在按压时缓慢跟随形变、松开后缓慢恢复（见积分循环尾部）。
+            //    松开瞬间：快速锚点(anchorK)立刻把 P 弹回大部分，
+            //    慢速锚点(kSlow)仍把 P 拉向形变记忆处 → 剩余部分缓慢复位，
+            //    形成"duang 一下 + 慢慢收回"的真人皮肤肉感回弹。
+            fx[idx] += kSlow * (p.SlowX - p.X);
+            fy[idx] += kSlow * (p.SlowY - p.Y);
+
             // ── 粘性阻尼：F = −c·v ──
             fx[idx] -= c * p.Vx;
             fy[idx] -= c * p.Vy;
         }
 
-        // ── 拖拽外力（v5.38：真实果冻按压位移场，独立于弹簧力循环）────
-        //    用户反馈 v5.22 吸引式"直接线条块收缩、没有果冻按压感"：
-        //    把整块拉向鼠标点 → 位移场生硬、边缘折线（像拽皱的布）。
+        // ── 拖拽外力（v5.42：cos 按压位移场 + 皮肤黏弹性）───────────────
         //    真实果冻按压 = 按下去中心圆润凹陷 + 四周微微鼓起 + 平滑过渡：
-        //      凹陷（向内）: sink(t) = A·(1−t)²，t = r/R
-        //                   —— 中心最深 A、边缘平滑归零，无硬边
-        //      隆起（向外）: bulge(t) = B·sin(π·(t−0.45)/0.55)，t∈[0.45,1]
+        //      凹陷（向内）: sink(t) = A·(0.5+0.5·cos(πt))，t = r/R
+        //                   —— C¹ 连续：中心/边缘斜率都为 0，无线条、圆润
+        //      隆起（向外）: bulge(t) = B·sin(π·(t−0.5))，t∈[0.5,1]
         //                   —— 按压把果冻肉挤向四周，环带微微鼓包
-        //      A ≈ MaxDisplacement·0.75（按压深度）；B ≈ A·0.35（鼓包高度）
+        //      A ≈ MaxDisplacement·0.35（按压深度）；B ≈ A·0.4（鼓包高度）
         //    目标 = 原始坐标 + 径向位移(−sink+bulge)·向外单位向量；
         //    弹簧力 F = k_drag·(target − P) 松弛到目标 → 松开后无外力回弹。
-        //    sink/bulge 都是连续平滑函数 → 形变圆润、无线条块。
+        //    v5.42 增强：位移幅度乘以 _pressDepth（渐进下陷/抬升），
+        //    按压中心用 _effMx/_effMy（拖拽黏手），配合慢速锚点形成肉感回弹。
         if (_dragging)
         {
-            // v5.40：更浅 + C¹ 平滑的 cos 位移场 —— 消除"皱巴巴/块状"。
-            //   此前 (1−t)² 在中心斜率陡（−2A/R），凹陷 120px 又太深，
-            //   中心附近纹理被剧烈压缩 → 像揉皱的纸；边缘过渡带只有 1~2 个
-            //   网格 → 折线。改为：
-            //     sink(t) = A·(0.5+0.5·cos(πt))  中心与边缘导数均为 0（C¹ 连续），
-            //              凹陷更浅（A = MaxDisplacement·0.35 ≈ 56px）
-            //     bulge(t) = B·sin(π·(t−0.5))    t∈[0.5,1] 环带隆起，两端导数 0
-            //   整条位移曲线处处平滑 → 纹理渐变压缩、边缘圆润。
-            double A = _p.MaxDisplacement * 0.35;
+            // 深度 = 按压渐进系数（0→1，按下 100ms 逐渐压到底）
+            double A = _p.MaxDisplacement * 0.35 * _pressDepth;
             double B = A * 0.4;
 
             for (int i2 = 0; i2 < count; i2++)
             {
                 MassPoint q = pts[i2];
-                double dx = q.X - _mx;   // 从按压中心指向质点的向量（向外）
-                double dy = q.Y - _my;
+                double dx = q.X - _effMx;   // 从有效按压中心指向质点（向外）
+                double dy = q.Y - _effMy;
                 double r = Math.Sqrt(dx * dx + dy * dy);
 
                 if (r < radius && r > 0.5)
@@ -358,6 +399,25 @@ public sealed class SpringMassGrid
                 double s = maxDisp / od;
                 p.X = p.RestX + ox * s;
                 p.Y = p.RestY + oy * s;
+            }
+
+            // ── 黏弹性"肉记忆"更新（v5.42）──────────────────────────────
+            //  拖拽时：Slow 缓慢跟随质点当前位置（皮肤被压出"记忆"，
+            //          长按记忆深、短按记忆浅 → 短按弹、长按肉）；
+            //  松开后：Slow 以 τ≈0.45s 指数恢复到原始坐标，
+            //          慢速锚点随之把质点剩余位移缓慢"收回去"。
+            //  配合快速锚点 → 回弹呈"duang 一下 + 慢慢收回"的真人皮肤肉感。
+            if (_dragging)
+            {
+                p.SlowX += (p.X - p.SlowX) * SlowFollow;
+                p.SlowY += (p.Y - p.SlowY) * SlowFollow;
+            }
+            else
+            {
+                double sr = dt / SlowRestoreT;
+                if (sr > 1) sr = 1;
+                p.SlowX += (p.RestX - p.SlowX) * sr;
+                p.SlowY += (p.RestY - p.SlowY) * sr;
             }
         }
 
