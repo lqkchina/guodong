@@ -13,7 +13,7 @@ public sealed class PhysicsParams
     /// 建议范围 16 ~ 64，默认 32（v5.22 参数）。
     /// 修改后需要重建网格（由调用方在 UI 变更时触发 Rebuild）。
     /// </summary>
-    public double GridCellSize { get; set; } = 32.0;
+    public double GridCellSize { get; set; } = 14.0;   // v5.39：默认网格更细（32→14），按压形变平滑无块状
 
     /// <summary>
     /// 弹簧刚度 Stiffness（决定回弹力度）。
