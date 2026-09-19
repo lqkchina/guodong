@@ -102,16 +102,14 @@ public sealed class SimulationLoop : IDisposable
             if (Math.Abs(grid.CellSize - _config.Physics.GridCellSize) > 0.01)
                 grid.Rebuild();
 
-            // v5.35：碰触式触发（玩果冻 = 手一碰就有反应）——
-            //   touching = 鼠标在桌面空白区域（不按键，划过/悬停即局部凹陷波动）
-            //   dragging = 左键按下（吸引增强，拖拽跟随）
-            // 以 v5.22 认可链路为基座：不改挂载/隐藏/渲染，只扩展触发方式。
+            // 仅当鼠标落在这块屏幕范围内才允许拖拽（多显示器互不干扰）
+            // v5.22 修复：必须"左键按下"才进入拖拽（此前只判断鼠标位置，
+            // 导致鼠标悬停就持续向鼠标位置收缩）
             bool inThisMonitor = layer.Bounds.Contains(mouse.X, mouse.Y);
-            bool touching = dragAllowed && inThisMonitor;
-            bool dragging = touching && mouse.LeftDown;
+            bool dragging = dragAllowed && inThisMonitor && mouse.LeftDown;
 
             // 拖拽坐标转为网格局部坐标（0..w, 0..h）
-            grid.SetDrag(mouse.X - layer.Bounds.X, mouse.Y - layer.Bounds.Y, touching, dragging);
+            grid.SetDrag(mouse.X - layer.Bounds.X, mouse.Y - layer.Bounds.Y, dragging);
             grid.Step(StepDt);
         }
 

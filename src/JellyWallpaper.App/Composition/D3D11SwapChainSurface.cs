@@ -345,25 +345,6 @@ float4 PSMain(PSInput i) : SV_Target
         float invW = 2f / screenW, invH = 2f / screenH;
         float texWf = texW > 0 ? texW : screenW, texHf = texH > 0 ? texH : screenH;
 
-        // v5.35：壁纸跨区（Cover）显示 —— 大图等比缩放铺满整个屏幕，
-        // 不再 1:1 只显示左上角裁剪部分。语义与系统"填充"一致：
-        //   scale = min(texW/screenW, texH/screenH)
-        //   源区域 src = screen*scale，居中截取，UV 映射整个屏幕。
-        // 壁纸缺失/加载失败时（texW<=0）回退 1:1 兜底。
-        float u0 = 0f, v0 = 0f, uScale = 1f / texWf, vScale = 1f / texHf;
-        if (texW > 0 && texH > 0)
-        {
-            float scale = MathF.Min(texWf / screenW, texHf / screenH);
-            float srcW = screenW * scale;
-            float srcH = screenH * scale;
-            float srcX = (texWf - srcW) / 2f;
-            float srcY = (texHf - srcH) / 2f;
-            u0 = srcX / texWf;
-            v0 = srcY / texHf;
-            uScale = srcW / texWf / screenW;
-            vScale = srcH / texHf / screenH;
-        }
-
         for (int r = 0; r < rows; r++)
         {
             for (int c = 0; c < cols; c++)
@@ -375,9 +356,9 @@ float4 PSMain(PSInput i) : SV_Target
                 // 屏幕像素 → NDC（D3D Y 轴向上，取反）
                 _vertexData[vi] = px * invW - 1f;
                 _vertexData[vi + 1] = 1f - py * invH;
-                // UV = 屏幕像素 → 壁纸源区域（Cover 跨区映射）
-                _vertexData[vi + 2] = u0 + px * uScale;
-                _vertexData[vi + 3] = v0 + py * vScale;
+                // UV = 未形变网格坐标 / 壁纸尺寸（1:1 映射语义）
+                _vertexData[vi + 2] = c * cellSize / texWf;
+                _vertexData[vi + 3] = r * cellSize / texHf;
             }
         }
         // Dynamic 缓冲正统更新：Map(WriteDiscard) + 拷贝（避免驱动对

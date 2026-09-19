@@ -61,9 +61,8 @@ public sealed class SpringMassGrid
     /// <summary>共享的可调参数对象（UI 修改立即生效）</summary>
     private readonly PhysicsParams _p;
 
-    // ── 鼠标碰触/拖拽状态（由 SimulationLoop 每帧更新）────────────────
-    private bool _touching;   // 碰触：鼠标在空白区域（不按键也触发凹陷波动）
-    private bool _dragging;   // 拖拽：左键按下（吸引增强）
+    // ── 鼠标拖拽状态（由 SimulationLoop 每帧更新）─────────────────────
+    private bool _dragging;   // 拖拽：左键按下
     private double _mx, _my;
 
     // ── 渲染双缓冲快照（volatile 引用，跨线程可见性由 volatile 保证）──
@@ -135,13 +134,11 @@ public sealed class SpringMassGrid
     public MassPoint GetPoint(int index) => _points[index];
 
     /// <summary>
-    /// 设置鼠标碰触/拖拽状态。SimulationLoop 在每次物理步进前调用：
-    ///   touching = 鼠标在桌面空白区域（不按键，碰触即触发局部凹陷波动）
-    ///   dragging = 左键按下（吸引增强，拖拽跟随）
+    /// 设置鼠标拖拽状态。SimulationLoop 在每次物理步进前调用：
+    /// 鼠标左键按下且不在图标上 → dragging=true，并给出鼠标坐标。
     /// </summary>
-    public void SetDrag(double mouseX, double mouseY, bool touching, bool dragging)
+    public void SetDrag(double mouseX, double mouseY, bool dragging)
     {
-        _touching = touching;
         _dragging = dragging;
         _mx = mouseX;
         _my = mouseY;
@@ -269,50 +266,31 @@ public sealed class SpringMassGrid
             fx[idx] -= c * p.Vx;
             fy[idx] -= c * p.Vy;
 
-            // ── 拖拽外力（v5.34：真实果冻按压位移场）────────────────────
-            //    玩果冻的按压感 = 按下去中心圆润凹陷 + 四周微微鼓起 + 平滑过渡，
-            //    不是"整块布被拽向鼠标"的线条收缩。
-            //    位移场设计（沿径向，指向/背离按压中心）：
-            //      凹陷（向内）: sink(t) = A·(1−t)²，t=r/R —— 中心最深、边缘平滑归零
-            //      隆起（向外）: bulge(t) = B·sin(π·(t−0.45)/0.55)，t∈[0.45,1]
-            //                   —— 按压把果冻肉挤向四周，环带微微鼓起
-            //      A ≈ MaxDisplacement·0.45（按住 0.75，更深）；B ≈ A·0.35
-            //    目标 = 原始坐标 + 径向位移(−sink+bulge)·向外单位向量；
-            //    弹簧力 F = k_active·(target − P) 松弛到目标 → 松开后无外力回弹。
-            //    sink/bulge 都是连续平滑函数 → 网格无硬边、无线条块。
-            if (_touching)
+            // ── 拖拽外力（v5.22 原版：吸引式，仅按下时生效）────────────
+            //    F_p = k_drag · (P_mouse − P) · (1 − d/R)² ，k_drag = 2·DragStrength·k
+            //    按住 → 半径内质点被拉向鼠标 → 局部凹陷；
+            //    拖拽 → 凹陷区域跟随鼠标；松开 → 弹簧/锚点回弹（Q 弹）。
+            //    d = |P_mouse − P|，半径边缘 (d→R) 处力衰减到 0，避免网格被撕开。
+            if (_dragging)
             {
-                double A = _p.MaxDisplacement * (_dragging ? 0.75 : 0.45);
-                double B = A * 0.35;
-                double kActive = _dragging ? kDrag : kDrag * 0.6;
+                double dx = _mx - p.X;
+                double dy = _my - p.Y;
+                double d = Math.Sqrt(dx * dx + dy * dy);
 
-                for (int i2 = 0; i2 < count; i2++)
+                if (d < radius && d > 0.5)
                 {
-                    MassPoint q = pts[i2];
-                    double dx = q.X - _mx;   // 从按压中心指向质点的向量（向外）
-                    double dy = q.Y - _my;
-                    double r = Math.Sqrt(dx * dx + dy * dy);
+                    // 平方衰减：(1 − d/R)² ∈ [0,1]，半径边缘平滑过渡
+                    double falloff = 1.0 - d / radius;
+                    falloff *= falloff;
 
-                    if (r < radius && r > 0.5)
+                    fx[idx] += kDrag * falloff * dx;
+                    fy[idx] += kDrag * falloff * dy;
+
+                    // 靠近鼠标中心时额外抑制速度，避免质点绕着鼠标抖动
+                    if (d < radius * 0.5)
                     {
-                        double t = r / radius;
-                        // 中心平滑凹陷（二次衰减）
-                        double sink = A * (1.0 - t) * (1.0 - t);
-                        // 环带隆起（正弦鼓包，0.45R~R 之间）
-                        double bulge = 0.0;
-                        if (t > 0.45)
-                            bulge = B * Math.Sin(Math.PI * (t - 0.45) / 0.55);
-
-                        double radial = sink - bulge;               // 内缩为正
-                        double nx = dx / r, ny = dy / r;            // 径向向外单位向量
-
-                        // 目标 = 原始坐标 + 径向位移（内缩 sink / 外鼓 bulge）
-                        double tx = q.RestX - nx * radial;
-                        double ty = q.RestY - ny * radial;
-
-                        // 弹簧力把质点松弛到目标位置（保持 Q 弹回弹）
-                        fx[i2] += kActive * (tx - q.X);
-                        fy[i2] += kActive * (ty - q.Y);
+                        p.Vx *= 0.85;
+                        p.Vy *= 0.85;
                     }
                 }
             }
