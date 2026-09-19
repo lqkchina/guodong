@@ -1,7 +1,7 @@
 <Window x:Class="JellyWallpaper.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="果冻弹性壁纸 · 设置 v5.36"
+        Title="果冻弹性壁纸 · 设置 v5.37"
         Width="470" Height="700" ResizeMode="NoResize">
 
     <Window.Resources>
