@@ -48,6 +48,9 @@
     <!-- 每显示器 V2 DPI 感知（见 app.manifest） -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
 
+    <!-- 应用图标（v5.44 新增：果冻按压主题） -->
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+
     <!-- 独立发布（目录版）：自带 .NET 运行时，绿色免安装 -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
@@ -71,6 +74,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\JellyWallpaper.Core\JellyWallpaper.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 应用图标资源：exe 文件图标 + WPF 窗口标题栏图标 -->
+    <Resource Include="Assets\app.ico" />
   </ItemGroup>
 
   <ItemGroup>

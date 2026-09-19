@@ -8,10 +8,6 @@ namespace JellyWallpaper.Core.Physics;
 ///     静止坐标差决定；锚点弹簧也以它为基准，保证松手后网格能整体回到原位。
 ///   * X/Y        —— 当前坐标（被弹簧力 / 拖拽外力驱动后的实时位置）。
 ///   * Vx/Vy      —— 当前速度（像素/秒）。物理积分只更新位置与速度两个状态量。
-///   * SlowX/SlowY —— 黏弹性"肉记忆"参考点（v5.42 新增）：
-///     模拟真人皮肤的黏弹性回弹——按压时它缓慢跟随形变（皮肤被压出
-///     "记忆"），松开后它以较慢的时间常数恢复到原始坐标，让回弹呈
-///     "先快后慢"的肉感（快速弹回大部分，剩余缓慢复位）。
 ///
 /// 质点质量 m 归一化为 1，因此"力 = 加速度"，物理方程可以简化。
 /// </summary>
@@ -35,16 +31,10 @@ public sealed class MassPoint
     /// <summary>速度 Y（像素/秒）</summary>
     public double Vy;
 
-    /// <summary>黏弹性"肉记忆"参考点 X（慢速锚点，见 SpringMassGrid.Step）</summary>
-    public double SlowX;
-
-    /// <summary>黏弹性"肉记忆"参考点 Y</summary>
-    public double SlowY;
-
     public MassPoint(double x, double y)
     {
-        RestX = X = SlowX = x;
-        RestY = Y = SlowY = y;
+        RestX = X = x;
+        RestY = Y = y;
     }
 
     /// <summary>
@@ -62,8 +52,6 @@ public sealed class MassPoint
     {
         X = RestX;
         Y = RestY;
-        SlowX = RestX;
-        SlowY = RestY;
         Vx = 0;
         Vy = 0;
     }
