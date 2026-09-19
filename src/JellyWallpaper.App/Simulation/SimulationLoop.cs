@@ -90,37 +90,28 @@ public sealed class SimulationLoop : IDisposable
 
         foreach (var layer in layers)
         {
-            // v5.27：网格向外扩展 MaxDisplacement 一圈（margin），
-            // 这样屏幕边缘的质点被拖向屏幕内部时，屏外仍有网格三角形
-            // 覆盖屏幕边缘 → 不再露出黑色清屏底。
-            double margin = _config.Physics.MaxDisplacement;
-            double totalW = layer.Bounds.Width + 2 * margin;
-            double totalH = layer.Bounds.Height + 2 * margin;
-
             // 首次为该屏幕创建物理网格（网格是纯数学对象，物理线程可直接创建）
             var grid = layer.Grid;
-            if (grid == null
-                || Math.Abs(grid.CellSize - _config.Physics.GridCellSize) > 0.01
-                || Math.Abs(grid.Width - totalW) > 0.01
-                || Math.Abs(grid.Height - totalH) > 0.01)
+            if (grid == null)
             {
-                // 网格密度参数 / 扩展边距（MaxDisplacement）变化 → 重建网格
-                grid = new SpringMassGrid(totalW, totalH, _config.Physics);
+                grid = new SpringMassGrid(layer.Bounds.Width, layer.Bounds.Height, _config.Physics);
                 layer.Grid = grid;
             }
 
-            // v5.33：碰触式触发 —— 玩果冻的手感：
-            //   · 鼠标【悬停/划过】桌面空白区域（不按键）→ 局部凹陷波动（温和吸引）
-            //   · 按住左键拖拽 → 吸引增强，跟随更紧
-            //   · 松开 → 弹簧回弹（Q 弹）
-            // 之前"必须按住左键拖拽才触发"导致点击/划过毫无反应（用户反馈"没效果"）。
-            bool inThisMonitor = layer.Bounds.Contains(mouse.X, mouse.Y);
-            bool touching = dragAllowed && inThisMonitor;                 // 碰触（不按键也触发）
-            bool dragging = dragAllowed && inThisMonitor && mouse.LeftDown; // 按住拖拽（增强）
+            // 网格密度参数变化 → 重建网格（设置面板实时修改立即生效）
+            if (Math.Abs(grid.CellSize - _config.Physics.GridCellSize) > 0.01)
+                grid.Rebuild();
 
-            // 拖拽坐标转为网格局部坐标：屏幕坐标 → 网格原点偏移 +margin
-            grid.SetDrag(mouse.X - layer.Bounds.X + margin,
-                         mouse.Y - layer.Bounds.Y + margin, touching, dragging);
+            // v5.35：碰触式触发（玩果冻 = 手一碰就有反应）——
+            //   touching = 鼠标在桌面空白区域（不按键，划过/悬停即局部凹陷波动）
+            //   dragging = 左键按下（吸引增强，拖拽跟随）
+            // 以 v5.22 认可链路为基座：不改挂载/隐藏/渲染，只扩展触发方式。
+            bool inThisMonitor = layer.Bounds.Contains(mouse.X, mouse.Y);
+            bool touching = dragAllowed && inThisMonitor;
+            bool dragging = touching && mouse.LeftDown;
+
+            // 拖拽坐标转为网格局部坐标（0..w, 0..h）
+            grid.SetDrag(mouse.X - layer.Bounds.X, mouse.Y - layer.Bounds.Y, touching, dragging);
             grid.Step(StepDt);
         }
 

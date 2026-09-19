@@ -52,9 +52,6 @@ public sealed class WallpaperLayerManager : IDisposable
     private readonly ExplorerWatcher _explorerWatcher;
     private string? _lastLoggedError; // 去重：错误文本不变时只写一次日志
 
-    /// <summary>v5.30：原生壁纸隐藏失败时周期重试（explorer 重启 / WorkerW 未就绪场景）</summary>
-    private DispatcherQueueTimer? _hideRetryTimer;
-
     /// <summary>当前所有屏幕的渲染层（物理线程每帧读取；重建时整体替换引用）</summary>
     private volatile IReadOnlyList<MonitorRenderLayer> _layers = Array.Empty<MonitorRenderLayer>();
     private volatile bool _disposed;
@@ -88,8 +85,7 @@ public sealed class WallpaperLayerManager : IDisposable
             string path = l.RenderPath;
             string initPart = initErr.Length > 0 ? " 初始化异常:" + initErr : "";
             string hidePart = _host.NativeWallpaperHidden ? " 原生壁纸=已隐藏" : " 原生壁纸=未隐藏";
-            string hideInfo = " " + _host.LastHideInfo;
-            return $"FPS={l.RenderFps:F0} 纹理={l.TextureInfo} 壁纸读取={WallpaperSource.LastReadInfo} {_simulation.LastDragInfo} {_host.HostWindowInfo}{hidePart}{hideInfo}{(path.Length > 0 ? $" 路径={path}" : "")}{(renderErr.Length > 0 ? " 渲染异常:" + renderErr : "")}{initPart} v5.34";
+            return $"FPS={l.RenderFps:F0} 纹理={l.TextureInfo} 壁纸读取={WallpaperSource.LastReadInfo} {_simulation.LastDragInfo} {_host.HostWindowInfo}{hidePart}{(path.Length > 0 ? $" 路径={path}" : "")}{(renderErr.Length > 0 ? " 渲染异常:" + renderErr : "")}{initPart}";
         }
     }
 
@@ -133,33 +129,6 @@ public sealed class WallpaperLayerManager : IDisposable
 
         _explorerWatcher.ExplorerRestarted += OnExplorerRestarted;
         _explorerWatcher.Start();
-
-        // v5.30：隐藏原生壁纸的重试保障 —— 程序启动/explorer 重启初期
-        // WorkerW 可能尚未就绪，首次隐藏失败会导致原生壁纸盖住本程序渲染层
-        // （表现为"拖拽没效果、看到的是系统壁纸"）。每 2 秒复查一次，
-        // 一旦发现原生壁纸未被隐藏就补隐藏，直到成功。
-        StartHideRetryTimer();
-    }
-
-    /// <summary>启动"原生壁纸隐藏"周期复查（合成线程定时器，2 秒一次）</summary>
-    private void StartHideRetryTimer()
-    {
-        if (_hideRetryTimer != null || _disposed) return;
-        var t = _queue.CreateTimer();
-        t.Interval = TimeSpan.FromSeconds(2);
-        t.IsRepeating = true;
-        t.Tick += (s, e) =>
-        {
-            if (_disposed)
-            {
-                t.Stop();
-                return;
-            }
-            if (!_host.NativeWallpaperHidden)
-                _host.HideNativeWallpaper();
-        };
-        t.Start();
-        _hideRetryTimer = t;
     }
 
     /// <summary>设置窗口修改了壁纸相关开关（跟随系统壁纸）后，立即重新应用</summary>
@@ -293,7 +262,6 @@ public sealed class WallpaperLayerManager : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        _hideRetryTimer?.Stop();
         _explorerWatcher.Dispose();
         _wallpaperWatcher.Dispose();
         _simulation.Dispose();

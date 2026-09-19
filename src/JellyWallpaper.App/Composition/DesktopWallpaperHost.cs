@@ -102,56 +102,38 @@ public sealed class DesktopWallpaperHost
     /// 成为桌面上唯一可见的壁纸画面。
     /// 只隐藏"不含桌面图标(SHELLDLL_DefView)"的 WorkerW —— 图标层绝不触碰。
     /// explorer 重启 / 壁纸切换后 WorkerW 会重建，需再次调用（见 WallpaperLayerManager）。
-    /// v5.31：改为【递归】收集所有层级下的 WorkerW —— 部分系统（Win10 19041+）
-    /// 的纯壁纸 WorkerW 挂在 Progman 之下、不是桌面顶层直接子级，
-    /// 旧版只在桌面顶层遍历会漏掉 → 原生壁纸未隐藏 → 本程序渲染层被盖住。
     /// </summary>
     public void HideNativeWallpaper()
     {
         try
         {
-            var all = new List<IntPtr>();
-            CollectWorkerWs(NativeMethods.GetDesktopWindow(), all);
-
-            int hidden = 0, pureCount = 0;
-            foreach (var worker in all)
+            IntPtr desktop = NativeMethods.GetDesktopWindow();
+            IntPtr worker = IntPtr.Zero;
+            bool hiddenAny = false;
+            do
             {
+                worker = NativeMethods.FindWindowEx(desktop, worker, "WorkerW", null);
+                if (worker == IntPtr.Zero) break;
+
                 // 含桌面图标的 WorkerW 不能动；只隐藏纯壁纸 WorkerW
                 if (NativeMethods.FindWindowEx(worker, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
                     continue;
 
-                pureCount++;
                 if (NativeMethods.IsWindowVisible(worker))
                 {
                     NativeMethods.ShowWindow(worker, 0); // SW_HIDE
-                    hidden++;
+                    hiddenAny = true;
                 }
-            }
+            } while (worker != IntPtr.Zero);
 
-            NativeWallpaperHidden = hidden > 0;
-            LastHideInfo = $"WorkerW={all.Count}(纯壁纸{pureCount},隐藏{hidden})";
+            NativeWallpaperHidden = hiddenAny;
         }
         catch
         {
             // 隐藏失败不影响主流程（最坏情况 = 原生壁纸盖住，与 v5.18 行为一致）
             NativeWallpaperHidden = false;
-            LastHideInfo = "隐藏异常";
         }
     }
-
-    /// <summary>递归收集 parent 下所有层级的 WorkerW 窗口句柄（含子级嵌套）</summary>
-    private static void CollectWorkerWs(IntPtr parent, List<IntPtr> result)
-    {
-        IntPtr worker = IntPtr.Zero;
-        while ((worker = NativeMethods.FindWindowEx(parent, worker, "WorkerW", null)) != IntPtr.Zero)
-        {
-            result.Add(worker);
-            CollectWorkerWs(worker, result); // 某些系统 WorkerW 存在嵌套
-        }
-    }
-
-    /// <summary>最近一次隐藏结果摘要（诊断显示：找到几个 WorkerW / 隐藏几个）</summary>
-    public string LastHideInfo { get; private set; } = "未执行";
 
     /// <summary>是否已成功挂载到桌面</summary>
     public bool IsInitialized => _initialized;

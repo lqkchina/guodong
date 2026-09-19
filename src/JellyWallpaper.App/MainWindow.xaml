@@ -1,7 +1,7 @@
 <Window x:Class="JellyWallpaper.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="果冻弹性壁纸 · 设置 v5.34"
+        Title="果冻弹性壁纸 · 设置 v5.35"
         Width="470" Height="700" ResizeMode="NoResize">
 
     <Window.Resources>
@@ -47,7 +47,7 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Text="网格尺寸" Grid.Column="0"/>
-                <TextBlock x:Name="LblGrid" Grid.Column="1" Text="24 px" Foreground="Gray"/>
+                <TextBlock x:Name="LblGrid" Grid.Column="1" Text="32 px" Foreground="Gray"/>
             </Grid>
             <Slider x:Name="SGrid" Minimum="8" Maximum="64" Style="{StaticResource ParamSlider}"
                     ValueChanged="SGrid_Changed"/>

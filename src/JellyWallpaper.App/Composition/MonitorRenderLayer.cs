@@ -103,37 +103,6 @@ public sealed class MonitorRenderLayer : IDisposable
     /// <summary>最近一次壁纸解码失败原因（后台线程写，诊断用）</summary>
     public volatile string? DecodeError;
 
-    /// <summary>
-    /// 系统壁纸放置模式（v5.27：按注册表 WallpaperStyle 映射 UV，
-    /// 解决大图被 1:1 裁剪显示不全的问题）。
-    ///   0=居中  1=平铺(按拉伸简化)  2=拉伸  6=适应(完整可见)  10=填充(默认)  22=跨区(按填充)
-    /// 只读一次并缓存；用户改系统壁纸设置后重启软件生效。
-    /// </summary>
-    public static int WallpaperFitMode { get; private set; } = 10;
-
-    static MonitorRenderLayer()
-    {
-        try
-        {
-            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop");
-            if (key != null)
-            {
-                object? style = key.GetValue("WallpaperStyle");
-                object? tile = key.GetValue("TileWallpaper");
-                int s = style is string ss && int.TryParse(ss, out var v) ? v : 10;
-                bool isTile = tile is string ts && ts == "1";
-                if (isTile) s = 1;              // 平铺优先
-                if (s != 0 && s != 1 && s != 2 && s != 6 && s != 10 && s != 22) s = 10;
-                if (s == 22) s = 10;            // 跨区：整图等比铺满（Cover），每屏显示对应区域
-                WallpaperFitMode = s;
-            }
-        }
-        catch
-        {
-            WallpaperFitMode = 10; // 读注册表失败 → 默认填充（Cover）
-        }
-    }
-
     public MonitorRenderLayer(DesktopWallpaperHost host, AppConfig config,
                               DispatcherQueue queue, Rectangle bounds, float dpi, IntPtr ownerDevicePtr)
     {
@@ -193,12 +162,9 @@ public sealed class MonitorRenderLayer : IDisposable
         var compositor = _host.Compositor ?? throw new InvalidOperationException("合成器未创建");
 
         // ① D3D11 交换链表面（网格顶点数 = 物理网格同口径）
-        //    v5.27：网格向外扩展 MaxDisplacement 边距（与 SimulationLoop 一致），
-        //    避免屏幕边缘被拖拽时露出黑色清屏底。
         float cell = (float)_config.Physics.GridCellSize;
-        float margin = (float)_config.Physics.MaxDisplacement;
-        int cols = (int)Math.Ceiling((Bounds.Width + 2 * margin) / cell) + 1;
-        int rows = (int)Math.Ceiling((Bounds.Height + 2 * margin) / cell) + 1;
+        int cols = (int)Math.Ceiling(Bounds.Width / cell) + 1;
+        int rows = (int)Math.Ceiling(Bounds.Height / cell) + 1;
         _d3dSurface = new Rendering.D3D11SwapChainSurface();
         _d3dSurface.Initialize(_ownerDevicePtr, Bounds.Width, Bounds.Height, cols, rows);
         if (_d3dSurface.SwapChainPtr == IntPtr.Zero)
@@ -334,9 +300,8 @@ public sealed class MonitorRenderLayer : IDisposable
             var grid = Grid;
             float[]? sx = grid?.SnapX;
             float[]? sy = grid?.SnapY;
-            float margin = (float)_config.Physics.MaxDisplacement;
-            int cols = grid?.Cols ?? (int)Math.Ceiling((Bounds.Width + 2 * margin) / _config.Physics.GridCellSize) + 1;
-            int rows = grid?.Rows ?? (int)Math.Ceiling((Bounds.Height + 2 * margin) / _config.Physics.GridCellSize) + 1;
+            int cols = grid?.Cols ?? (int)Math.Ceiling(Bounds.Width / _config.Physics.GridCellSize) + 1;
+            int rows = grid?.Rows ?? (int)Math.Ceiling(Bounds.Height / _config.Physics.GridCellSize) + 1;
             float cell = (float)_config.Physics.GridCellSize;
 
             // ② 壁纸像素（后台解码；未加载时传 null → 纯色兜底纹理）
@@ -345,9 +310,7 @@ public sealed class MonitorRenderLayer : IDisposable
             if (px != null) { _wallpaperW = tw; _wallpaperH = th; }
 
             // ③ 渲染到交换链（内部：顶点更新 → 纹理 → 绘制 → Present）
-            //    v5.27：传扩展边距 margin + 系统壁纸放置模式（跨区/填充=Cover 等比铺满）
-            _d3dSurface.Render(sx, sy, cols, rows, cell, px, tw, th,
-                Bounds.Width, Bounds.Height, margin, WallpaperFitMode);
+            _d3dSurface.Render(sx, sy, cols, rows, cell, px, tw, th, Bounds.Width, Bounds.Height);
             _renderPath = "SwapChain";
             LastRenderError = _d3dSurface.LastError.Length > 0 ? "渲染失败 " + _d3dSurface.LastError : null;
         }

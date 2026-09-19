@@ -302,23 +302,14 @@ float4 PSMain(PSInput i) : SV_Target
     /// <param name="cols/rows">网格顶点列/行数（与 Initialize 一致）</param>
     /// <param name="cellSize">网格单元像素尺寸（UV 映射用）</param>
     /// <param name="pixels">壁纸 BGRA 像素（null = 纯色兜底）</param>
-    /// <param name="margin">网格向外扩展的边距（像素）= MaxDisplacement，防止边缘露黑</param>
-    /// <param name="fitMode">壁纸放置模式（0=居中 1=平铺[按拉伸] 2=拉伸 6=适应 10=填充/跨区默认）</param>
     public void Render(float[]? snapX, float[]? snapY, int cols, int rows, float cellSize,
-                       byte[]? pixels, int texW, int texH, int screenW, int screenH,
-                       float margin, int fitMode)
+                       byte[]? pixels, int texW, int texH, int screenW, int screenH)
     {
         if (_disposed || _swapChain == null) return;
         try
         {
-            // v5.27：网格尺寸（列/行数）可能因参数/边距变化而改变 ——
-            // 索引/顶点缓冲必须随之重建，否则顶点与索引不匹配
-            // → 屏幕斜线/锯齿/越界崩溃（用户实测问题）。
-            EnsureBuffers(cols, rows);
-
             EnsureWallpaperTexture(pixels, texW, texH);
-            UpdateVertices(snapX, snapY, cols, rows, cellSize, screenW, screenH, texW, texH,
-                           margin, fitMode);
+            UpdateVertices(snapX, snapY, cols, rows, cellSize, screenW, screenH, texW, texH);
 
             _ctx.OutputMerger.SetRenderTargets(_rtv);
             // 清屏色：深蓝灰（合成层正常时被壁纸网格完全覆盖，仅纹理缺失时可见）
@@ -345,97 +336,33 @@ float4 PSMain(PSInput i) : SV_Target
         }
     }
 
-    /// <summary>
-    /// 确保索引/顶点缓冲容量与当前网格尺寸匹配（v5.27）。
-    /// 网格列/行数变化时（扩展边距、网格密度参数被修改）重建两个缓冲：
-    ///   索引缓冲 = IMMUTABLE + 初始数据（D3D11 对不可变缓冲的硬性要求）；
-    ///   顶点缓冲 = Dynamic（容量 = 当前顶点数 × 16 字节）。
-    /// </summary>
-    private void EnsureBuffers(int cols, int rows)
-    {
-        if (cols == _cols && rows == _rows) return;
-
-        _cols = cols;
-        _rows = rows;
-        _vertexCount = cols * rows;
-        _indexCount = (cols - 1) * (rows - 1) * 6;
-
-        // 索引缓冲重建（必须带初始数据，IMMUTABLE）
-        _indexBuffer?.Dispose();
-        _indexData = new int[_indexCount];
-        BuildIndexData();
-        var igch = System.Runtime.InteropServices.GCHandle.Alloc(
-            _indexData, System.Runtime.InteropServices.GCHandleType.Pinned);
-        try
-        {
-            _indexBuffer = new Buffer(_d3d, igch.AddrOfPinnedObject(),
-                new BufferDescription(_indexCount * 4, ResourceUsage.Immutable,
-                    BindFlags.IndexBuffer, CpuAccessFlags.None,
-                    ResourceOptionFlags.None, 0));
-        }
-        finally
-        {
-            igch.Free();
-        }
-
-        // 顶点缓冲重建（Dynamic，容量随顶点数变化）
-        _vertexBuffer?.Dispose();
-        _vertexBuffer = new Buffer(_d3d, new BufferDescription(
-            _vertexCount * 16, ResourceUsage.Dynamic, BindFlags.VertexBuffer,
-            CpuAccessFlags.Write, ResourceOptionFlags.None, 0));
-        _vertexData = new float[_vertexCount * 4];
-    }
-
     /// <summary>更新顶点缓冲：物理网格形变位置 → NDC + UV</summary>
-    /// <param name="margin">网格扩展边距（物理网格比屏幕大 margin 圈，屏幕坐标 = 网格坐标 − margin）</param>
-    /// <param name="fitMode">壁纸放置模式（0=居中 1=平铺[按拉伸] 2=拉伸 6=适应 10=填充/跨区默认=Cover）</param>
     private void UpdateVertices(float[]? snapX, float[]? snapY, int cols, int rows,
-                                float cellSize, int screenW, int screenH, int texW, int texH,
-                                float margin, int fitMode)
+                                float cellSize, int screenW, int screenH, int texW, int texH)
     {
         int vc = cols * rows;
         if (_vertexData.Length != vc * 4) _vertexData = new float[vc * 4];
         float invW = 2f / screenW, invH = 2f / screenH;
         float texWf = texW > 0 ? texW : screenW, texHf = texH > 0 ? texH : screenH;
 
-        // ── UV 映射：把"壁纸源区域(srcX,srcY,srcW,srcH)"映射到整个屏幕 ──
-        //    v5.27：跨区/填充(Cover) 等比缩放铺满，大图不再 1:1 裁剪只显示左上角。
-        //    缩放系数 = min(tw/sw, th/sh)（此前误用 Max → 源区域超过壁纸 → 错乱）
-        float srcX = 0f, srcY = 0f, srcW = texWf, srcH = texHf;
-        switch (fitMode)
+        // v5.35：壁纸跨区（Cover）显示 —— 大图等比缩放铺满整个屏幕，
+        // 不再 1:1 只显示左上角裁剪部分。语义与系统"填充"一致：
+        //   scale = min(texW/screenW, texH/screenH)
+        //   源区域 src = screen*scale，居中截取，UV 映射整个屏幕。
+        // 壁纸缺失/加载失败时（texW<=0）回退 1:1 兜底。
+        float u0 = 0f, v0 = 0f, uScale = 1f / texWf, vScale = 1f / texHf;
+        if (texW > 0 && texH > 0)
         {
-            case 0: // Center
-                srcX = (texWf - screenW) / 2f;
-                srcY = (texHf - screenH) / 2f;
-                srcW = screenW;
-                srcH = screenH;
-                break;
-            case 6: // Fit (Contain)
-            {
-                float scale = MathF.Min(texWf / screenW, texHf / screenH);
-                srcW = texWf / scale;
-                srcH = texHf / scale;
-                srcX = (texWf - srcW) / 2f;
-                srcY = (texHf - srcH) / 2f;
-                break;
-            }
-            case 2: // Stretch（含平铺简化）
-            case 1:
-                srcX = 0; srcY = 0; srcW = texWf; srcH = texHf;
-                break;
-            default: // 10 Fill / 22 跨区 → Cover（等比铺满，居中裁掉多余）
-            {
-                float scale = MathF.Min(texWf / screenW, texHf / screenH);
-                srcW = screenW * scale;
-                srcH = screenH * scale;
-                srcX = (texWf - srcW) / 2f;
-                srcY = (texHf - srcH) / 2f;
-                break;
-            }
+            float scale = MathF.Min(texWf / screenW, texHf / screenH);
+            float srcW = screenW * scale;
+            float srcH = screenH * scale;
+            float srcX = (texWf - srcW) / 2f;
+            float srcY = (texHf - srcH) / 2f;
+            u0 = srcX / texWf;
+            v0 = srcY / texHf;
+            uScale = srcW / texWf / screenW;
+            vScale = srcH / texHf / screenH;
         }
-        float u0 = srcX / texWf, v0 = srcY / texHf;
-        float uScale = srcW / texWf / screenW;   // 每屏幕像素对应的 UV 增量
-        float vScale = srcH / texHf / screenH;
 
         for (int r = 0; r < rows; r++)
         {
@@ -443,17 +370,12 @@ float4 PSMain(PSInput i) : SV_Target
             {
                 int idx = r * cols + c;
                 int vi = idx * 4;
-                float gx = snapX != null && idx < snapX.Length ? snapX[idx] : c * cellSize;
-                float gy = snapY != null && idx < snapY.Length ? snapY[idx] : r * cellSize;
-                // 网格坐标 → 屏幕坐标（扩展网格整体偏移 margin）
-                float px = gx - margin;
-                float py = gy - margin;
+                float px = snapX != null && idx < snapX.Length ? snapX[idx] : c * cellSize;
+                float py = snapY != null && idx < snapY.Length ? snapY[idx] : r * cellSize;
                 // 屏幕像素 → NDC（D3D Y 轴向上，取反）
                 _vertexData[vi] = px * invW - 1f;
                 _vertexData[vi + 1] = 1f - py * invH;
-                // UV：屏幕像素 → 壁纸源区域。
-                // 屏幕外（扩展 margin 区）的 UV 超出源区域 → 采样器 Clamp →
-                // 壁纸边缘像素延伸覆盖 → 拖拽到屏幕边缘也不露黑底
+                // UV = 屏幕像素 → 壁纸源区域（Cover 跨区映射）
                 _vertexData[vi + 2] = u0 + px * uScale;
                 _vertexData[vi + 3] = v0 + py * vScale;
             }
