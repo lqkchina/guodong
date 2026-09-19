@@ -21,7 +21,7 @@ public sealed class PhysicsParams
     /// 越大 → 回弹越快、手感越"硬"；过大会导致数值发散（见 Step 注释中的稳定性条件）。
     /// 默认 120（v5.22 参数）。
     /// </summary>
-    public double Stiffness { get; set; } = 120.0;
+    public double Stiffness { get; set; } = 145.0;   // v5.43：调高 → 回弹频率更高、更Q弹
 
     /// <summary>
     /// 阻尼 Damping（抑制回弹震荡的阻尼比 ζ，取值 0 ~ 1）。
@@ -32,7 +32,7 @@ public sealed class PhysicsParams
     ///   ζ > 1   → 过阻尼，缓慢爬回静止，无弹感。
     /// 默认 0.25（v5.22 参数）。
     /// </summary>
-    public double Damping { get; set; } = 0.25;
+    public double Damping { get; set; } = 0.16;      // v5.43：降低 → 松开后抖动衰减更慢、更持久
 
     /// <summary>
     /// 拖拽影响半径（像素）：鼠标周围多大范围内的质点会被拖拽力影响。

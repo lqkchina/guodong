@@ -84,9 +84,9 @@ public sealed class SpringMassGrid
     //   PressT       按压下陷时间常数（秒）
     //   ReleaseT     松开抬升时间常数（秒）
     //   EffMouseT    有效按压中心平滑时间常数（秒）→ 拖拽黏手感
-    private const double kSlow = 8.0;
+    private const double kSlow = 5.0;    // v5.43：8→5，减弱对震荡的压制 → Q弹抖动更持久
     private const double SlowFollow = 0.02;
-    private const double SlowRestoreT = 0.45;
+    private const double SlowRestoreT = 0.55;  // v5.43：0.45→0.55，肉感收回更绵长
     private const double PressT = 0.10;
     private const double ReleaseT = 0.08;
     private const double EffMouseT = 0.06;
