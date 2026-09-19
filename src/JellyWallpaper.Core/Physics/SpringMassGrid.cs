@@ -282,8 +282,16 @@ public sealed class SpringMassGrid
         //    sink/bulge 都是连续平滑函数 → 形变圆润、无线条块。
         if (_dragging)
         {
-            double A = _p.MaxDisplacement * 0.75;
-            double B = A * 0.35;
+            // v5.40：更浅 + C¹ 平滑的 cos 位移场 —— 消除"皱巴巴/块状"。
+            //   此前 (1−t)² 在中心斜率陡（−2A/R），凹陷 120px 又太深，
+            //   中心附近纹理被剧烈压缩 → 像揉皱的纸；边缘过渡带只有 1~2 个
+            //   网格 → 折线。改为：
+            //     sink(t) = A·(0.5+0.5·cos(πt))  中心与边缘导数均为 0（C¹ 连续），
+            //              凹陷更浅（A = MaxDisplacement·0.35 ≈ 56px）
+            //     bulge(t) = B·sin(π·(t−0.5))    t∈[0.5,1] 环带隆起，两端导数 0
+            //   整条位移曲线处处平滑 → 纹理渐变压缩、边缘圆润。
+            double A = _p.MaxDisplacement * 0.35;
+            double B = A * 0.4;
 
             for (int i2 = 0; i2 < count; i2++)
             {
@@ -295,16 +303,16 @@ public sealed class SpringMassGrid
                 if (r < radius && r > 0.5)
                 {
                     double t = r / radius;
-                    // 中心平滑凹陷（二次衰减，中心最深、边缘归零）
-                    double sink = A * (1.0 - t) * (1.0 - t);
+                    // cos 平滑凹陷（中心/边缘导数均为 0 → 无线条）
+                    double sink = A * (0.5 + 0.5 * Math.Cos(Math.PI * t));
                     // v5.39 防翻转：凹陷量不得超过离中心的 85% ——
                     // 否则中心附近顶点会被推到按压中心另一侧（三角形翻转），
-                    // 视觉上就是"块状褶皱/乱线"。钳制后顶点平滑收拢、不穿透。
+                    // 视觉上就是"块状褶皱/乱线"。
                     if (sink > r * 0.85) sink = r * 0.85;
-                    // 环带隆起（正弦鼓包，0.45R~R 之间平滑出现再消失）
+                    // 环带隆起（0.5R~R 正弦鼓包，两端平滑出现/消失）
                     double bulge = 0.0;
-                    if (t > 0.45)
-                        bulge = B * Math.Sin(Math.PI * (t - 0.45) / 0.55);
+                    if (t > 0.5)
+                        bulge = B * Math.Sin(Math.PI * (t - 0.5));
 
                     double radial = sink - bulge;               // 内缩为正
                     double nx = dx / r, ny = dy / r;            // 径向向外单位向量
